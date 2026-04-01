@@ -12,8 +12,8 @@
 external_components:
   - source:
       type: git
-      url: https://github.com/claudio-walser/esphome-fingerprint-doorbell
-      ref: v1.1.5
+      url: https://github.com/fingerprint-doorbell/esphome
+      ref: keypad
     components: [ fingerprint_doorbell ]
     refresh: 0s
 esphome:
