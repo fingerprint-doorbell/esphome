@@ -45,12 +45,12 @@ fingerprint_doorbell:
   keypad_row_pins:
     - GPIO32  # ROW1 (1,2,3) - Blue wire
     - GPIO27  # ROW2 (4,5,6) - Yellow wire
-    - GPIO33  # ROW3 (7,8,9) - Orange wire
+    - GPIO18  # ROW3 (7,8,9) - Orange wire
     - GPIO4   # ROW4 (*,0,#) - Purple wire
   keypad_col_pins:
     - GPIO25  # COL1 - Green wire
     - GPIO22  # COL2 - Red wire
-    - GPIO35  # COL3 - White wire (Input-Only pin, OK for columns)
+    - GPIO33  # COL3 - White wire
 
   # LED configuration (colors: red, blue, purple)
   # LED modes: breathing, flashing, on, off, gradual_on, gradual_off

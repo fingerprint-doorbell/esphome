@@ -589,13 +589,11 @@ Same license as the original FingerprintDoorbell project.
 |------------|----------|------------|-------------|
 | PAD 4      | ROW1     | IO32       | Blue        |
 | PAD 2      | ROW2     | IO27       | Yellow      |
-| PAD 6      | ROW3     | IO33       | Orange      |
+| PAD 6      | ROW3     | IO18       | Orange      |
 | PAD 5      | ROW4     | IO04       | Purple      |
 | PAD 3      | COL1     | IO25       | Green       |
 | PAD 8      | COL2     | IO22       | Red         |
-| PAD 7      | COL3     | IO35       | White       |
-
-> **Note:** GPIO35 is input-only, which is fine for column pins (active scanning reads). Row pins must be output-capable.
+| PAD 7      | COL3     | IO33       | White       |
 
 ### Keypad Layout
 ```
