@@ -34,11 +34,22 @@ void FingerprintDoorbell::setup() {
   this->sensor_connected_ = false;
   this->mode_ = Mode::SCAN;
   
+  // Setup keypad if configured
+  if (this->keypad_enabled_) {
+    this->setup_keypad();
+    this->load_pin_codes();
+  }
+  
   // Setup REST API
   this->setup_web_server();
 }
 
 void FingerprintDoorbell::loop() {
+  // Scan keypad if enabled (always, independent of fingerprint sensor)
+  if (this->keypad_enabled_) {
+    this->scan_keypad();
+  }
+  
   // Connect sensor if not connected (throttled to every 5 seconds)
   if (!this->sensor_connected_) {
     uint32_t now = millis();
@@ -1391,6 +1402,134 @@ class FingerprintRequestHandler : public AsyncWebHandler {
       return;
     }
     
+    // ==================== PIN CODE ENDPOINTS ====================
+    
+    // GET /pincode/list - List all PIN codes (without revealing the actual codes)
+    if (url == "/pincode/list" && request->method() == HTTP_GET) {
+      this->send_cors_response(request, 200, "application/json", this->parent_->get_pin_code_list_json());
+      return;
+    }
+    
+    // GET /pincode/status - Get keypad status
+    if (url == "/pincode/status" && request->method() == HTTP_GET) {
+      std::string json = "{\"enabled\":" + std::string(this->parent_->is_keypad_enabled() ? "true" : "false");
+      json += ",\"count\":" + std::to_string(this->parent_->get_pin_code_count()) + "}";
+      this->send_cors_response(request, 200, "application/json", json);
+      return;
+    }
+    
+    // POST /pincode/add?id=X&code=XXXX&name=Y - Add a new PIN code
+    if (url == "/pincode/add" && request->method() == HTTP_POST) {
+      if (!request->hasParam("id") || !request->hasParam("code") || !request->hasParam("name")) {
+        this->send_cors_response(request, 400, "application/json", "{\"error\":\"Missing id, code, or name parameter\"}");
+        return;
+      }
+      std::string id_str = request->getParam("id")->value();
+      std::string code = request->getParam("code")->value();
+      std::string name = request->getParam("name")->value();
+      uint16_t id = std::atoi(id_str.c_str());
+      
+      if (id < 1 || id > 100) {
+        this->send_cors_response(request, 400, "application/json", "{\"error\":\"ID must be 1-100\"}");
+        return;
+      }
+      if (code.length() < 4 || code.length() > 10) {
+        this->send_cors_response(request, 400, "application/json", "{\"error\":\"Code must be 4-10 digits\"}");
+        return;
+      }
+      for (char c : code) {
+        if (c < '0' || c > '9') {
+          this->send_cors_response(request, 400, "application/json", "{\"error\":\"Code must contain only digits 0-9\"}");
+          return;
+        }
+      }
+      
+      if (this->parent_->add_pin_code(id, code, name)) {
+        std::string response = "{\"status\":\"added\",\"id\":" + std::to_string(id) + ",\"name\":\"" + name + "\"}";
+        this->send_cors_response(request, 200, "application/json", response);
+      } else {
+        this->send_cors_response(request, 500, "application/json", "{\"error\":\"Failed to add PIN code (ID may already exist)\"}");
+      }
+      return;
+    }
+    
+    // POST /pincode/delete?id=X - Delete a PIN code
+    if (url == "/pincode/delete" && request->method() == HTTP_POST) {
+      if (!request->hasParam("id")) {
+        this->send_cors_response(request, 400, "application/json", "{\"error\":\"Missing id parameter\"}");
+        return;
+      }
+      std::string id_str = request->getParam("id")->value();
+      uint16_t id = std::atoi(id_str.c_str());
+      
+      if (this->parent_->delete_pin_code(id)) {
+        std::string response = "{\"status\":\"deleted\",\"id\":" + std::to_string(id) + "}";
+        this->send_cors_response(request, 200, "application/json", response);
+      } else {
+        this->send_cors_response(request, 500, "application/json", "{\"error\":\"Delete failed\"}");
+      }
+      return;
+    }
+    
+    // POST /pincode/delete_all - Delete all PIN codes
+    if (url == "/pincode/delete_all" && request->method() == HTTP_POST) {
+      if (this->parent_->delete_all_pin_codes()) {
+        this->send_cors_response(request, 200, "application/json", "{\"status\":\"all_deleted\"}");
+      } else {
+        this->send_cors_response(request, 500, "application/json", "{\"error\":\"Delete all failed\"}");
+      }
+      return;
+    }
+    
+    // POST /pincode/rename?id=X&name=Y - Rename a PIN code
+    if (url == "/pincode/rename" && request->method() == HTTP_POST) {
+      if (!request->hasParam("id") || !request->hasParam("name")) {
+        this->send_cors_response(request, 400, "application/json", "{\"error\":\"Missing id or name parameter\"}");
+        return;
+      }
+      std::string id_str = request->getParam("id")->value();
+      std::string name = request->getParam("name")->value();
+      uint16_t id = std::atoi(id_str.c_str());
+      
+      if (this->parent_->rename_pin_code(id, name)) {
+        std::string response = "{\"status\":\"renamed\",\"id\":" + std::to_string(id) + ",\"name\":\"" + name + "\"}";
+        this->send_cors_response(request, 200, "application/json", response);
+      } else {
+        this->send_cors_response(request, 500, "application/json", "{\"error\":\"Rename failed\"}");
+      }
+      return;
+    }
+    
+    // POST /pincode/update?id=X&code=XXXX - Update PIN code value
+    if (url == "/pincode/update" && request->method() == HTTP_POST) {
+      if (!request->hasParam("id") || !request->hasParam("code")) {
+        this->send_cors_response(request, 400, "application/json", "{\"error\":\"Missing id or code parameter\"}");
+        return;
+      }
+      std::string id_str = request->getParam("id")->value();
+      std::string code = request->getParam("code")->value();
+      uint16_t id = std::atoi(id_str.c_str());
+      
+      if (code.length() < 4 || code.length() > 10) {
+        this->send_cors_response(request, 400, "application/json", "{\"error\":\"Code must be 4-10 digits\"}");
+        return;
+      }
+      for (char c : code) {
+        if (c < '0' || c > '9') {
+          this->send_cors_response(request, 400, "application/json", "{\"error\":\"Code must contain only digits 0-9\"}");
+          return;
+        }
+      }
+      
+      if (this->parent_->update_pin_code(id, code)) {
+        std::string response = "{\"status\":\"updated\",\"id\":" + std::to_string(id) + "}";
+        this->send_cors_response(request, 200, "application/json", response);
+      } else {
+        this->send_cors_response(request, 500, "application/json", "{\"error\":\"Update failed\"}");
+      }
+      return;
+    }
+    
     this->send_cors_response(request, 404, "application/json", "{\"error\":\"Unknown endpoint\"}");
   }
   
@@ -1476,7 +1615,367 @@ void FingerprintDoorbell::setup_web_server() {
   
   base->init();
   base->add_handler(new FingerprintRequestHandler(this));
-  ESP_LOGI(TAG, "REST API registered at /fingerprint/*");
+  ESP_LOGI(TAG, "REST API registered at /fingerprint/* and /pincode/*");
+}
+
+// ==================== KEYPAD FUNCTIONS ====================
+
+void FingerprintDoorbell::setup_keypad() {
+  ESP_LOGI(TAG, "Setting up keypad with %d rows and %d cols", 
+           this->keypad_row_pins_.size(), this->keypad_col_pins_.size());
+  
+  // Configure row pins as OUTPUT, initially HIGH (inactive)
+  for (auto *pin : this->keypad_row_pins_) {
+    pin->setup();
+    pin->pin_mode(gpio::FLAG_OUTPUT);
+    pin->digital_write(true);  // HIGH = inactive
+  }
+  
+  // Configure column pins as INPUT with PULLUP
+  for (auto *pin : this->keypad_col_pins_) {
+    pin->setup();
+    pin->pin_mode(gpio::FLAG_INPUT | gpio::FLAG_PULLUP);
+  }
+  
+  this->keypad_buffer_.clear();
+  this->keypad_last_key_time_ = 0;
+  this->keypad_last_key_ = 0;
+  this->keypad_last_scan_time_ = 0;
+}
+
+void FingerprintDoorbell::scan_keypad() {
+  // Throttle scanning to every 20ms
+  uint32_t now = millis();
+  if (now - this->keypad_last_scan_time_ < 20) {
+    return;
+  }
+  this->keypad_last_scan_time_ = now;
+  
+  // Clear buffer if no input for 10 seconds
+  if (this->keypad_buffer_.length() > 0 && 
+      now - this->keypad_last_key_time_ > 10000) {
+    ESP_LOGD(TAG, "Keypad buffer timeout, clearing");
+    this->keypad_buffer_.clear();
+  }
+  
+  char key = this->get_pressed_key();
+  
+  // Debounce: only process if key changed and debounce period passed
+  if (key != this->keypad_last_key_) {
+    // Key released or new key pressed
+    if (key != 0 && (now - this->keypad_last_key_time_ > 150)) {
+      // New key pressed after debounce
+      this->process_keypad_input(key);
+      this->keypad_last_key_time_ = now;
+    }
+    this->keypad_last_key_ = key;
+  }
+}
+
+char FingerprintDoorbell::get_pressed_key() {
+  // 4x3 keypad layout
+  static const char keys[4][3] = {
+    {'1', '2', '3'},
+    {'4', '5', '6'},
+    {'7', '8', '9'},
+    {'*', '0', '#'}
+  };
+  
+  // Scan each row
+  for (size_t row = 0; row < this->keypad_row_pins_.size() && row < 4; row++) {
+    // Set current row LOW (active)
+    this->keypad_row_pins_[row]->digital_write(false);
+    
+    // Small delay for signal to stabilize
+    delayMicroseconds(10);
+    
+    // Check each column
+    for (size_t col = 0; col < this->keypad_col_pins_.size() && col < 3; col++) {
+      if (!this->keypad_col_pins_[col]->digital_read()) {
+        // Key pressed (column reads LOW when connected to active LOW row)
+        this->keypad_row_pins_[row]->digital_write(true);  // Restore row HIGH
+        return keys[row][col];
+      }
+    }
+    
+    // Restore row to HIGH (inactive)
+    this->keypad_row_pins_[row]->digital_write(true);
+  }
+  
+  return 0;  // No key pressed
+}
+
+void FingerprintDoorbell::process_keypad_input(char key) {
+  ESP_LOGD(TAG, "Keypad key pressed: %c", key);
+  
+  if (key == '*') {
+    // Confirm/submit PIN
+    if (this->keypad_buffer_.length() >= 4) {
+      this->verify_pin_code();
+    } else if (this->keypad_buffer_.length() > 0) {
+      ESP_LOGD(TAG, "PIN too short (min 4 digits)");
+      // Publish invalid attempt for too short PIN
+      if (this->pin_invalid_sensor_ != nullptr) {
+        this->pin_invalid_sensor_->publish_state(true);
+        this->set_timeout(500, [this]() {
+          this->pin_invalid_sensor_->publish_state(false);
+        });
+      }
+      this->publish_last_action("PIN too short");
+    }
+    this->keypad_buffer_.clear();
+  } else if (key == '#') {
+    // Lock action
+    this->trigger_lock_action();
+    this->keypad_buffer_.clear();
+  } else if (key >= '0' && key <= '9') {
+    // Digit - add to buffer (max 10 digits)
+    if (this->keypad_buffer_.length() < 10) {
+      this->keypad_buffer_ += key;
+      ESP_LOGD(TAG, "Keypad buffer: %d digits", this->keypad_buffer_.length());
+    }
+  }
+}
+
+void FingerprintDoorbell::verify_pin_code() {
+  ESP_LOGI(TAG, "Verifying PIN code (%d digits)", this->keypad_buffer_.length());
+  
+  // Search for matching PIN code
+  for (const auto &pair : this->pin_codes_) {
+    if (pair.second.code == this->keypad_buffer_) {
+      // Match found!
+      ESP_LOGI(TAG, "PIN match: ID=%d, Name=%s", pair.first, pair.second.name.c_str());
+      
+      // Publish match to sensors
+      if (this->pin_match_name_sensor_ != nullptr) {
+        this->pin_match_name_sensor_->publish_state(pair.second.name);
+      }
+      
+      // Also publish to the main match name sensor for unified handling
+      if (this->match_name_sensor_ != nullptr) {
+        this->match_name_sensor_->publish_state("PIN: " + pair.second.name);
+      }
+      
+      this->publish_last_action("PIN unlock: " + pair.second.name);
+      
+      // Set LED to match state (same as fingerprint match)
+      this->set_led_ring_match();
+      this->last_match_time_ = millis();
+      
+      return;
+    }
+  }
+  
+  // No match - invalid PIN
+  ESP_LOGW(TAG, "Invalid PIN code entered");
+  
+  if (this->pin_invalid_sensor_ != nullptr) {
+    this->pin_invalid_sensor_->publish_state(true);
+    this->set_timeout(500, [this]() {
+      this->pin_invalid_sensor_->publish_state(false);
+    });
+  }
+  
+  this->publish_last_action("Invalid PIN");
+  
+  // Set LED to no-match state
+  this->set_led_ring_no_match();
+  this->last_ring_time_ = millis();
+}
+
+void FingerprintDoorbell::trigger_lock_action() {
+  ESP_LOGI(TAG, "Lock action triggered via keypad");
+  
+  if (this->lock_action_sensor_ != nullptr) {
+    this->lock_action_sensor_->publish_state(true);
+    this->set_timeout(500, [this]() {
+      this->lock_action_sensor_->publish_state(false);
+    });
+  }
+  
+  this->publish_last_action("Lock triggered");
+}
+
+// ==================== PIN CODE STORAGE ====================
+
+void FingerprintDoorbell::load_pin_codes() {
+  this->pin_codes_.clear();
+  
+  for (uint16_t i = 1; i <= 100; i++) {
+    // Load code
+    std::string code_key = "pin_code_" + std::to_string(i);
+    ESPPreferenceObject code_pref = global_preferences->make_preference<std::array<char, 16>>(fnv1_hash(code_key.c_str()));
+    
+    std::array<char, 16> code_array;
+    if (code_pref.load(&code_array)) {
+      std::string code(code_array.data());
+      if (!code.empty() && code[0] != '\0') {
+        // Load name
+        std::string name_key = "pin_name_" + std::to_string(i);
+        ESPPreferenceObject name_pref = global_preferences->make_preference<std::array<char, 32>>(fnv1_hash(name_key.c_str()));
+        
+        std::array<char, 32> name_array;
+        std::string name = "Unknown";
+        if (name_pref.load(&name_array)) {
+          name = std::string(name_array.data());
+        }
+        
+        PinCode pc;
+        pc.id = i;
+        pc.code = code;
+        pc.name = name;
+        this->pin_codes_[i] = pc;
+      }
+    }
+  }
+  
+  ESP_LOGI(TAG, "%d PIN codes loaded", this->pin_codes_.size());
+}
+
+void FingerprintDoorbell::save_pin_code(uint16_t id, const std::string &code, const std::string &name) {
+  // Save code
+  std::string code_key = "pin_code_" + std::to_string(id);
+  ESPPreferenceObject code_pref = global_preferences->make_preference<std::array<char, 16>>(fnv1_hash(code_key.c_str()));
+  
+  std::array<char, 16> code_array = {};
+  strncpy(code_array.data(), code.c_str(), 15);
+  code_array[15] = '\0';
+  code_pref.save(&code_array);
+  
+  // Save name
+  std::string name_key = "pin_name_" + std::to_string(id);
+  ESPPreferenceObject name_pref = global_preferences->make_preference<std::array<char, 32>>(fnv1_hash(name_key.c_str()));
+  
+  std::array<char, 32> name_array = {};
+  strncpy(name_array.data(), name.c_str(), 31);
+  name_array[31] = '\0';
+  name_pref.save(&name_array);
+  
+  // Update in-memory map
+  PinCode pc;
+  pc.id = id;
+  pc.code = code;
+  pc.name = name;
+  this->pin_codes_[id] = pc;
+}
+
+void FingerprintDoorbell::delete_pin_code_storage(uint16_t id) {
+  // Clear code
+  std::string code_key = "pin_code_" + std::to_string(id);
+  ESPPreferenceObject code_pref = global_preferences->make_preference<std::array<char, 16>>(fnv1_hash(code_key.c_str()));
+  
+  std::array<char, 16> empty_code = {};
+  code_pref.save(&empty_code);
+  
+  // Clear name
+  std::string name_key = "pin_name_" + std::to_string(id);
+  ESPPreferenceObject name_pref = global_preferences->make_preference<std::array<char, 32>>(fnv1_hash(name_key.c_str()));
+  
+  std::array<char, 32> empty_name = {};
+  name_pref.save(&empty_name);
+  
+  // Remove from in-memory map
+  this->pin_codes_.erase(id);
+}
+
+// ==================== PIN CODE MANAGEMENT (PUBLIC) ====================
+
+bool FingerprintDoorbell::add_pin_code(uint16_t id, const std::string &code, const std::string &name) {
+  // Check if ID already exists
+  if (this->pin_codes_.find(id) != this->pin_codes_.end()) {
+    ESP_LOGW(TAG, "PIN code ID %d already exists", id);
+    return false;
+  }
+  
+  // Check if code already exists (prevent duplicate codes)
+  for (const auto &pair : this->pin_codes_) {
+    if (pair.second.code == code) {
+      ESP_LOGW(TAG, "PIN code already in use by ID %d", pair.first);
+      return false;
+    }
+  }
+  
+  this->save_pin_code(id, code, name);
+  ESP_LOGI(TAG, "Added PIN code: ID=%d, Name=%s", id, name.c_str());
+  this->publish_last_action("PIN added: " + name);
+  return true;
+}
+
+bool FingerprintDoorbell::delete_pin_code(uint16_t id) {
+  if (this->pin_codes_.find(id) == this->pin_codes_.end()) {
+    ESP_LOGW(TAG, "PIN code ID %d not found", id);
+    return false;
+  }
+  
+  std::string name = this->pin_codes_[id].name;
+  this->delete_pin_code_storage(id);
+  ESP_LOGI(TAG, "Deleted PIN code: ID=%d", id);
+  this->publish_last_action("PIN deleted: " + name);
+  return true;
+}
+
+bool FingerprintDoorbell::delete_all_pin_codes() {
+  for (auto &pair : this->pin_codes_) {
+    this->delete_pin_code_storage(pair.first);
+  }
+  this->pin_codes_.clear();
+  ESP_LOGI(TAG, "All PIN codes deleted");
+  this->publish_last_action("All PINs deleted");
+  return true;
+}
+
+bool FingerprintDoorbell::rename_pin_code(uint16_t id, const std::string &new_name) {
+  if (this->pin_codes_.find(id) == this->pin_codes_.end()) {
+    ESP_LOGW(TAG, "PIN code ID %d not found", id);
+    return false;
+  }
+  
+  std::string code = this->pin_codes_[id].code;
+  this->save_pin_code(id, code, new_name);
+  ESP_LOGI(TAG, "Renamed PIN code: ID=%d to %s", id, new_name.c_str());
+  this->publish_last_action("PIN renamed: " + new_name);
+  return true;
+}
+
+bool FingerprintDoorbell::update_pin_code(uint16_t id, const std::string &new_code) {
+  if (this->pin_codes_.find(id) == this->pin_codes_.end()) {
+    ESP_LOGW(TAG, "PIN code ID %d not found", id);
+    return false;
+  }
+  
+  // Check if new code already exists
+  for (const auto &pair : this->pin_codes_) {
+    if (pair.first != id && pair.second.code == new_code) {
+      ESP_LOGW(TAG, "PIN code already in use by ID %d", pair.first);
+      return false;
+    }
+  }
+  
+  std::string name = this->pin_codes_[id].name;
+  this->save_pin_code(id, new_code, name);
+  ESP_LOGI(TAG, "Updated PIN code: ID=%d", id);
+  this->publish_last_action("PIN updated: " + name);
+  return true;
+}
+
+std::string FingerprintDoorbell::get_pin_code_list_json() {
+  std::string json = "[";
+  bool first = true;
+  
+  for (const auto &pair : this->pin_codes_) {
+    if (!first) json += ",";
+    first = false;
+    // Note: We don't return the actual code for security
+    json += "{\"id\":" + std::to_string(pair.first);
+    json += ",\"name\":\"" + pair.second.name + "\"}";
+  }
+  
+  json += "]";
+  return json;
+}
+
+uint16_t FingerprintDoorbell::get_pin_code_count() {
+  return this->pin_codes_.size();
 }
 
 }  // namespace fingerprint_doorbell

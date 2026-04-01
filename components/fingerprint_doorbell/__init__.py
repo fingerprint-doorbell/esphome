@@ -11,6 +11,10 @@ CONF_DOORBELL_PIN = "doorbell_pin"
 CONF_IGNORE_TOUCH_RING = "ignore_touch_ring"
 CONF_API_TOKEN = "api_token"
 
+# Keypad configuration constants
+CONF_KEYPAD_ROW_PINS = "keypad_row_pins"
+CONF_KEYPAD_COL_PINS = "keypad_col_pins"
+
 # LED configuration constants
 CONF_LED_READY_COLOR = "led_ready_color"
 CONF_LED_READY_MODE = "led_ready_mode"
@@ -67,6 +71,15 @@ CONFIG_SCHEMA = cv.Schema(
         cv.Optional(CONF_DOORBELL_PIN): pins.gpio_output_pin_schema,
         cv.Optional(CONF_IGNORE_TOUCH_RING, default=False): cv.boolean,
         cv.Optional(CONF_API_TOKEN): cv.string,
+        # Keypad pins (4 rows, 3 columns for standard 4x3 matrix keypad)
+        cv.Optional(CONF_KEYPAD_ROW_PINS): cv.All(
+            cv.ensure_list(pins.gpio_output_pin_schema),
+            cv.Length(min=4, max=4)
+        ),
+        cv.Optional(CONF_KEYPAD_COL_PINS): cv.All(
+            cv.ensure_list(pins.gpio_input_pin_schema),
+            cv.Length(min=3, max=3)
+        ),
         # LED Ready state (idle, waiting for finger)
         cv.Optional(CONF_LED_READY_COLOR): cv.one_of(*LED_COLORS, lower=True),
         cv.Optional(CONF_LED_READY_MODE): cv.one_of(*LED_MODES, lower=True),
@@ -201,6 +214,18 @@ async def to_code(config):
 
     if CONF_API_TOKEN in config:
         cg.add(var.set_api_token(config[CONF_API_TOKEN]))
+
+    # Keypad configuration
+    if CONF_KEYPAD_ROW_PINS in config and CONF_KEYPAD_COL_PINS in config:
+        row_pins = []
+        for pin_conf in config[CONF_KEYPAD_ROW_PINS]:
+            pin = await cg.gpio_pin_expression(pin_conf)
+            row_pins.append(pin)
+        col_pins = []
+        for pin_conf in config[CONF_KEYPAD_COL_PINS]:
+            pin = await cg.gpio_pin_expression(pin_conf)
+            col_pins.append(pin)
+        cg.add(var.set_keypad_pins(row_pins, col_pins))
 
     # LED Ready configuration (only if any value specified)
     if CONF_LED_READY_COLOR in config or CONF_LED_READY_MODE in config or CONF_LED_READY_SPEED in config:

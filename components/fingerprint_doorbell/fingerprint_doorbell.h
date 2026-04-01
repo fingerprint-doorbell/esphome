@@ -32,6 +32,12 @@ struct LedConfig {
   uint8_t speed;
 };
 
+struct PinCode {
+  uint16_t id;
+  std::string code;
+  std::string name;
+};
+
 class FingerprintDoorbell : public Component {
  public:
   FingerprintDoorbell() = default;
@@ -46,6 +52,11 @@ class FingerprintDoorbell : public Component {
   void set_doorbell_pin(GPIOPin *pin) { doorbell_pin_ = pin; }
   void set_ignore_touch_ring(bool ignore) { ignore_touch_ring_ = ignore; }
   void set_api_token(const std::string &token) { api_token_ = token; }
+  void set_keypad_pins(const std::vector<GPIOPin *> &row_pins, const std::vector<GPIOPin *> &col_pins) {
+    keypad_row_pins_ = row_pins;
+    keypad_col_pins_ = col_pins;
+    keypad_enabled_ = true;
+  }
 
   // LED configuration setters
   void set_led_ready(uint8_t color, uint8_t mode, uint8_t speed) {
@@ -75,6 +86,9 @@ class FingerprintDoorbell : public Component {
   void set_finger_sensor(binary_sensor::BinarySensor *sensor) { finger_sensor_ = sensor; }
   void set_enroll_status_sensor(text_sensor::TextSensor *sensor) { enroll_status_sensor_ = sensor; }
   void set_last_action_sensor(text_sensor::TextSensor *sensor) { last_action_sensor_ = sensor; }
+  void set_pin_match_name_sensor(text_sensor::TextSensor *sensor) { pin_match_name_sensor_ = sensor; }
+  void set_pin_invalid_sensor(binary_sensor::BinarySensor *sensor) { pin_invalid_sensor_ = sensor; }
+  void set_lock_action_sensor(binary_sensor::BinarySensor *sensor) { lock_action_sensor_ = sensor; }
 
   // Public methods for HA services and REST API
   void start_enrollment(uint16_t id, const std::string &name);
@@ -98,6 +112,16 @@ class FingerprintDoorbell : public Component {
   // Template transfer methods for copying fingerprints between devices
   bool get_template(uint16_t id, std::vector<uint8_t> &template_data);
   bool upload_template(uint16_t id, const std::string &name, const std::vector<uint8_t> &template_data);
+  
+  // PIN code management
+  bool add_pin_code(uint16_t id, const std::string &code, const std::string &name);
+  bool delete_pin_code(uint16_t id);
+  bool delete_all_pin_codes();
+  bool rename_pin_code(uint16_t id, const std::string &new_name);
+  bool update_pin_code(uint16_t id, const std::string &new_code);
+  std::string get_pin_code_list_json();
+  uint16_t get_pin_code_count();
+  bool is_keypad_enabled() { return keypad_enabled_; }
 
  protected:
   GPIOPin *touch_pin_{nullptr};
@@ -122,6 +146,9 @@ class FingerprintDoorbell : public Component {
   binary_sensor::BinarySensor *finger_sensor_{nullptr};
   text_sensor::TextSensor *enroll_status_sensor_{nullptr};
   text_sensor::TextSensor *last_action_sensor_{nullptr};
+  text_sensor::TextSensor *pin_match_name_sensor_{nullptr};
+  binary_sensor::BinarySensor *pin_invalid_sensor_{nullptr};
+  binary_sensor::BinarySensor *lock_action_sensor_{nullptr};
 
   // Internal state
   Adafruit_Fingerprint *finger_{nullptr};
@@ -148,6 +175,16 @@ class FingerprintDoorbell : public Component {
   bool sensor_paired_{false};
   uint32_t sensor_password_{0};
 
+  // Keypad state
+  bool keypad_enabled_{false};
+  std::vector<GPIOPin *> keypad_row_pins_;
+  std::vector<GPIOPin *> keypad_col_pins_;
+  std::string keypad_buffer_;
+  uint32_t keypad_last_key_time_{0};
+  char keypad_last_key_{0};
+  uint32_t keypad_last_scan_time_{0};
+  std::map<uint16_t, PinCode> pin_codes_;
+
   // Internal methods
   void load_sensor_password();
   void save_sensor_password();
@@ -168,6 +205,17 @@ class FingerprintDoorbell : public Component {
   void publish_enroll_status(const std::string &status);
   void publish_last_action(const std::string &action);
   void setup_web_server();
+  
+  // Keypad methods
+  void setup_keypad();
+  void scan_keypad();
+  char get_pressed_key();
+  void process_keypad_input(char key);
+  void verify_pin_code();
+  void trigger_lock_action();
+  void load_pin_codes();
+  void save_pin_code(uint16_t id, const std::string &code, const std::string &name);
+  void delete_pin_code_storage(uint16_t id);
 };
 
 // ==================== AUTOMATION ACTIONS ====================

@@ -4,6 +4,8 @@ from esphome.components import binary_sensor
 from esphome.const import (
     CONF_ID,
     DEVICE_CLASS_OCCUPANCY,
+    DEVICE_CLASS_PROBLEM,
+    DEVICE_CLASS_LOCK,
 )
 from . import FingerprintDoorbell, CONF_FINGERPRINT_DOORBELL_ID, fingerprint_doorbell_ns
 
@@ -11,6 +13,8 @@ DEPENDENCIES = ["fingerprint_doorbell"]
 
 CONF_RING = "ring"
 CONF_FINGER = "finger"
+CONF_PIN_INVALID = "pin_invalid"
+CONF_LOCK_ACTION = "lock_action"
 
 CONFIG_SCHEMA = cv.Schema(
     {
@@ -20,6 +24,14 @@ CONFIG_SCHEMA = cv.Schema(
         ),
         cv.Optional(CONF_FINGER): binary_sensor.binary_sensor_schema(
             device_class=DEVICE_CLASS_OCCUPANCY,
+        ),
+        cv.Optional(CONF_PIN_INVALID): binary_sensor.binary_sensor_schema(
+            device_class=DEVICE_CLASS_PROBLEM,
+            icon="mdi:alert-circle",
+        ),
+        cv.Optional(CONF_LOCK_ACTION): binary_sensor.binary_sensor_schema(
+            device_class=DEVICE_CLASS_LOCK,
+            icon="mdi:lock",
         ),
     }
 )
@@ -35,3 +47,11 @@ async def to_code(config):
     if CONF_FINGER in config:
         sens = await binary_sensor.new_binary_sensor(config[CONF_FINGER])
         cg.add(parent.set_finger_sensor(sens))
+
+    if CONF_PIN_INVALID in config:
+        sens = await binary_sensor.new_binary_sensor(config[CONF_PIN_INVALID])
+        cg.add(parent.set_pin_invalid_sensor(sens))
+
+    if CONF_LOCK_ACTION in config:
+        sens = await binary_sensor.new_binary_sensor(config[CONF_LOCK_ACTION])
+        cg.add(parent.set_lock_action_sensor(sens))

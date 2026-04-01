@@ -39,6 +39,19 @@ fingerprint_doorbell:
   ignore_touch_ring: false
   api_token: ${api_encryption_key}  # Protects REST API endpoints
 
+  # Matrix Keypad 4x3 configuration
+  # Layout: 1-9 on rows 1-3, row 4 has *, 0, #
+  # * = confirm PIN, # = lock action
+  keypad_row_pins:
+    - GPIO32  # ROW1 (1,2,3) - Blue wire
+    - GPIO27  # ROW2 (4,5,6) - Yellow wire
+    - GPIO0   # ROW3 (7,8,9) - White wire
+    - GPIO4   # ROW4 (*,0,#) - Purple wire
+  keypad_col_pins:
+    - GPIO25  # COL1 - Green wire
+    - GPIO22  # COL2 - Red wire
+    - GPIO2   # COL3 - Orange wire
+
   # LED configuration (colors: red, blue, purple)
   # LED modes: breathing, flashing, on, off, gradual_on, gradual_off
   # LED speed: 0-255 (lower = faster)
@@ -97,6 +110,9 @@ text_sensor:
     last_action:
       name: "Last Action"
       id: fp_last_action
+    pin_match_name:
+      name: "PIN Match Name"
+      id: fp_pin_match_name
 
 binary_sensor:
   - platform: fingerprint_doorbell
@@ -107,3 +123,9 @@ binary_sensor:
     finger:
       name: "Finger Detected"
       id: fp_finger
+    pin_invalid:
+      name: "PIN Invalid"
+      id: fp_pin_invalid
+    lock_action:
+      name: "Lock Action"
+      id: fp_lock_action
