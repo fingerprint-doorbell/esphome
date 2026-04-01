@@ -1624,14 +1624,14 @@ void FingerprintDoorbell::setup_keypad() {
   ESP_LOGI(TAG, "Setting up keypad with %d rows and %d cols", 
            this->keypad_row_pins_.size(), this->keypad_col_pins_.size());
   
-  // Configure row pins as OUTPUT, initially HIGH (inactive)
+  // Configure ALL pins as INPUT with PULLUP initially
+  // The get_pressed_key() function dynamically changes pin modes during scanning
+  // because this keypad has non-standard wiring where any pin can be output or input
   for (auto *pin : this->keypad_row_pins_) {
     pin->setup();
-    pin->pin_mode(gpio::FLAG_OUTPUT);
-    pin->digital_write(true);  // HIGH = inactive
+    pin->pin_mode(gpio::FLAG_INPUT | gpio::FLAG_PULLUP);
   }
   
-  // Configure column pins as INPUT with PULLUP
   for (auto *pin : this->keypad_col_pins_) {
     pin->setup();
     pin->pin_mode(gpio::FLAG_INPUT | gpio::FLAG_PULLUP);
@@ -1673,30 +1673,76 @@ void FingerprintDoorbell::scan_keypad() {
 }
 
 char FingerprintDoorbell::get_pressed_key() {
-  // 4x3 keypad layout
-  static const char keys[4][3] = {
-    {'1', '2', '3'},
-    {'4', '5', '6'},
-    {'7', '8', '9'},
-    {'*', '0', '#'}
+  // Custom keypad scanning based on auto-scan results
+  // The keypad has non-standard wiring - we scan ALL pins as potential outputs
+  // and check ALL other pins as inputs to detect key presses.
+  //
+  // From auto-scan (out_gpio -> in_gpio):
+  // 1: GPIO25 -> GPIO32    5: GPIO26 -> GPIO27    9: GPIO0 -> GPIO2
+  // 2: GPIO27 -> GPIO25    6: GPIO0 -> GPIO26     *: GPIO32 -> GPIO4
+  // 3: GPIO0 -> GPIO25     7: GPIO2 -> GPIO32     0: GPIO4 -> GPIO27
+  // 4: GPIO26 -> GPIO32    8: GPIO27 -> GPIO2     #: GPIO0 -> GPIO4
+  //
+  // YAML pin order: rows = [GPIO32, GPIO27, GPIO2, GPIO4], cols = [GPIO25, GPIO26, GPIO0]
+  // Indices:        rows = [0,      1,      2,     3],     cols = [0,      1,      2]
+  
+  // Combined pin array: [row0, row1, row2, row3, col0, col1, col2]
+  //                     [GPIO32, GPIO27, GPIO2, GPIO4, GPIO25, GPIO26, GPIO0]
+  //                     [  0,      1,      2,     3,     4,      5,      6  ]
+  
+  // Key mapping: {out_index, in_index, key}
+  // Based on auto-scan where out drives LOW and in reads LOW when pressed
+  static const struct { uint8_t out; uint8_t in; char key; } key_map[] = {
+    {4, 0, '1'},  // GPIO25(col0)->GPIO32(row0)
+    {1, 4, '2'},  // GPIO27(row1)->GPIO25(col0)
+    {6, 4, '3'},  // GPIO0(col2)->GPIO25(col0)
+    {5, 0, '4'},  // GPIO26(col1)->GPIO32(row0)
+    {5, 1, '5'},  // GPIO26(col1)->GPIO27(row1)
+    {6, 5, '6'},  // GPIO0(col2)->GPIO26(col1)
+    {2, 0, '7'},  // GPIO2(row2)->GPIO32(row0)
+    {1, 2, '8'},  // GPIO27(row1)->GPIO2(row2)
+    {6, 2, '9'},  // GPIO0(col2)->GPIO2(row2)
+    {0, 3, '*'},  // GPIO32(row0)->GPIO4(row3)
+    {3, 1, '0'},  // GPIO4(row3)->GPIO27(row1)
+    {6, 3, '#'},  // GPIO0(col2)->GPIO4(row3)
   };
   
-  // DEBUG: Log all column states for each row
-  for (size_t row = 0; row < this->keypad_row_pins_.size() && row < 4; row++) {
-    this->keypad_row_pins_[row]->digital_write(false);  // Activate row
-    delayMicroseconds(50);
+  // Build combined pin array
+  std::vector<GPIOPin*> all_pins;
+  for (auto pin : this->keypad_row_pins_) all_pins.push_back(pin);
+  for (auto pin : this->keypad_col_pins_) all_pins.push_back(pin);
+  
+  if (all_pins.size() < 7) {
+    return 0;  // Not enough pins configured
+  }
+  
+  // Set all pins to input with pullup first
+  for (auto pin : all_pins) {
+    pin->pin_mode(gpio::FLAG_INPUT | gpio::FLAG_PULLUP);
+  }
+  delayMicroseconds(10);
+  
+  // Scan each key mapping
+  for (const auto &mapping : key_map) {
+    if (mapping.out >= all_pins.size() || mapping.in >= all_pins.size()) continue;
     
-    bool c0 = !this->keypad_col_pins_[0]->digital_read();
-    bool c1 = !this->keypad_col_pins_[1]->digital_read();
-    bool c2 = !this->keypad_col_pins_[2]->digital_read();
+    GPIOPin* out_pin = all_pins[mapping.out];
+    GPIOPin* in_pin = all_pins[mapping.in];
     
-    this->keypad_row_pins_[row]->digital_write(true);  // Deactivate row
+    // Drive output LOW
+    out_pin->pin_mode(gpio::FLAG_OUTPUT);
+    out_pin->digital_write(false);
+    delayMicroseconds(20);
     
-    if (c0 || c1 || c2) {
-      ESP_LOGI(TAG, "ROW%d active: COL0=%d COL1=%d COL2=%d", row, c0, c1, c2);
-      if (c0) return keys[row][0];
-      if (c1) return keys[row][1];
-      if (c2) return keys[row][2];
+    // Check if input reads LOW (key pressed)
+    bool pressed = !in_pin->digital_read();
+    
+    // Reset output to input
+    out_pin->pin_mode(gpio::FLAG_INPUT | gpio::FLAG_PULLUP);
+    
+    if (pressed) {
+      ESP_LOGI(TAG, "Keypad: out=%d in=%d -> key='%c'", mapping.out, mapping.in, mapping.key);
+      return mapping.key;
     }
   }
   

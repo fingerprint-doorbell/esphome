@@ -587,13 +587,13 @@ Same license as the original FingerprintDoorbell project.
 
 | Matrix-Pad | Function | ESP32-GPIO | Cable Color |
 |------------|----------|------------|-------------|
-| PAD 4      | ROW1     | IO32       | Blue        |
-| PAD 2      | ROW2     | IO27       | Yellow      |
-| PAD 6      | ROW3     | IO18       | Orange      |
-| PAD 5      | ROW4     | IO04       | Purple      |
-| PAD 3      | COL1     | IO25       | Green       |
-| PAD 8      | COL2     | IO22       | Red         |
-| PAD 7      | COL3     | IO33       | White       |
+| PAD 1      | ROW2     | IO27       | Yellow      |
+| PAD 2      | COL1     | IO25       | Green       |
+| PAD 3      | ROW1     | IO32       | Blue        |
+| PAD 4      | ROW4     | IO04       | Purple      |
+| PAD 5      | COL3     | IO00       | White       |
+| PAD 6      | ROW3     | IO02       | Orange      |
+| PAD 7      | COL2     | IO26       | Red         |
 
 ### Keypad Layout
 ```
