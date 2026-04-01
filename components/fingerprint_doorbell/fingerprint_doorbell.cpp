@@ -1135,7 +1135,7 @@ class FingerprintRequestHandler : public AsyncWebHandler {
   
   bool canHandle(AsyncWebServerRequest *request) const override {
     std::string url = request->url();
-    return url.rfind("/fingerprint/", 0) == 0;  // starts_with equivalent
+    return url.rfind("/fingerprint/", 0) == 0 || url.rfind("/pincode/", 0) == 0;
   }
   
   bool isRequestHandlerTrivial() const override { return false; }
