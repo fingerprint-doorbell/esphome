@@ -1681,26 +1681,23 @@ char FingerprintDoorbell::get_pressed_key() {
     {'*', '0', '#'}
   };
   
-  // Scan each row
+  // DEBUG: Log all column states for each row
   for (size_t row = 0; row < this->keypad_row_pins_.size() && row < 4; row++) {
-    // Set current row LOW (active)
-    this->keypad_row_pins_[row]->digital_write(false);
+    this->keypad_row_pins_[row]->digital_write(false);  // Activate row
+    delayMicroseconds(50);
     
-    // Small delay for signal to stabilize
-    delayMicroseconds(10);
+    bool c0 = !this->keypad_col_pins_[0]->digital_read();
+    bool c1 = !this->keypad_col_pins_[1]->digital_read();
+    bool c2 = !this->keypad_col_pins_[2]->digital_read();
     
-    // Check each column
-    for (size_t col = 0; col < this->keypad_col_pins_.size() && col < 3; col++) {
-      if (!this->keypad_col_pins_[col]->digital_read()) {
-        // Key pressed (column reads LOW when connected to active LOW row)
-        this->keypad_row_pins_[row]->digital_write(true);  // Restore row HIGH
-        ESP_LOGI(TAG, "Keypad: row=%d col=%d -> key='%c'", row, col, keys[row][col]);
-        return keys[row][col];
-      }
+    this->keypad_row_pins_[row]->digital_write(true);  // Deactivate row
+    
+    if (c0 || c1 || c2) {
+      ESP_LOGI(TAG, "ROW%d active: COL0=%d COL1=%d COL2=%d", row, c0, c1, c2);
+      if (c0) return keys[row][0];
+      if (c1) return keys[row][1];
+      if (c2) return keys[row][2];
     }
-    
-    // Restore row to HIGH (inactive)
-    this->keypad_row_pins_[row]->digital_write(true);
   }
   
   return 0;  // No key pressed
