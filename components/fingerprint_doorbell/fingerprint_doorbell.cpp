@@ -1694,6 +1694,7 @@ char FingerprintDoorbell::get_pressed_key() {
       if (!this->keypad_col_pins_[col]->digital_read()) {
         // Key pressed (column reads LOW when connected to active LOW row)
         this->keypad_row_pins_[row]->digital_write(true);  // Restore row HIGH
+        ESP_LOGI(TAG, "Keypad: row=%d col=%d -> key='%c'", row, col, keys[row][col]);
         return keys[row][col];
       }
     }
