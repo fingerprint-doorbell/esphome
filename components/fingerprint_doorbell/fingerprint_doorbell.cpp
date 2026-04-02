@@ -2090,11 +2090,15 @@ void FingerprintDoorbell::scan_keypad() {
   }
   this->keypad_last_scan_time_ = now;
   
-  // Clear buffer if no input for 10 seconds
+  // Clear buffer and reset LED if no input for 4 seconds
   if (this->keypad_buffer_.length() > 0 && 
-      now - this->keypad_last_key_time_ > 10000) {
+      now - this->keypad_last_key_time_ > 4000) {
     ESP_LOGD(TAG, "Keypad buffer timeout, clearing");
     this->keypad_buffer_.clear();
+    if (this->keypad_input_active_) {
+      this->keypad_input_active_ = false;
+      this->set_led_ring_ready();
+    }
   }
   
   char key = this->get_pressed_key();
@@ -2176,15 +2180,26 @@ void FingerprintDoorbell::process_keypad_input(char key) {
         });
       }
       this->publish_last_action("PIN too short");
+      // Show error LED for 1 second
+      this->set_led_ring_no_match();
+      this->last_ring_time_ = millis();
     }
     this->keypad_buffer_.clear();
+    this->keypad_input_active_ = false;
   } else if (key == '#') {
     // Lock action
     this->trigger_lock_action();
     this->keypad_buffer_.clear();
+    this->keypad_input_active_ = false;
+    this->set_led_ring_ready();
   } else if (key >= '0' && key <= '9') {
     // Digit - add to buffer (max 10 digits)
     if (this->keypad_buffer_.length() < 10) {
+      // First digit - set LED to scanning (blue flashing)
+      if (this->keypad_buffer_.empty() && !this->keypad_input_active_) {
+        this->keypad_input_active_ = true;
+        this->set_led_ring_scanning();
+      }
       this->keypad_buffer_ += key;
       ESP_LOGD(TAG, "Keypad buffer: %d digits", this->keypad_buffer_.length());
     }
@@ -2193,6 +2208,9 @@ void FingerprintDoorbell::process_keypad_input(char key) {
 
 void FingerprintDoorbell::verify_pin_code() {
   ESP_LOGI(TAG, "Verifying PIN code (%d digits)", this->keypad_buffer_.length());
+  
+  // Reset input active state
+  this->keypad_input_active_ = false;
   
   // Search for matching PIN code
   for (const auto &pair : this->pin_codes_) {
@@ -2213,7 +2231,7 @@ void FingerprintDoorbell::verify_pin_code() {
       
       this->publish_last_action("PIN unlock: " + pair.second.name);
       
-      // Set LED to match state (same as fingerprint match)
+      // Set LED to match state (pink) - will reset after 1 second via loop()
       this->set_led_ring_match();
       this->last_match_time_ = millis();
       
@@ -2233,7 +2251,7 @@ void FingerprintDoorbell::verify_pin_code() {
   
   this->publish_last_action("Invalid PIN");
   
-  // Set LED to no-match state
+  // Set LED to no-match state (red) - will reset after 1 second via loop()
   this->set_led_ring_no_match();
   this->last_ring_time_ = millis();
 }

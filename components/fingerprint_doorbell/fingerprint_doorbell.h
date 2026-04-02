@@ -184,6 +184,7 @@ class FingerprintDoorbell : public Component {
   uint32_t keypad_last_key_time_{0};
   char keypad_last_key_{0};
   uint32_t keypad_last_scan_time_{0};
+  bool keypad_input_active_{false};  // Track if PIN input is in progress
   std::map<uint16_t, PinCode> pin_codes_;
 
   // Internal methods
