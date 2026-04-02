@@ -1969,6 +1969,24 @@ class FingerprintRequestHandler : public AsyncWebHandler {
       return;
     }
     
+    // GET /pincode/export?id=X - Export a PIN code (id, name, code)
+    if (url == "/pincode/export" && request->method() == HTTP_GET) {
+      if (!request->hasParam("id")) {
+        this->send_cors_response(request, 400, "application/json", "{\"error\":\"Missing id parameter\"}");
+        return;
+      }
+      std::string id_str = request->getParam("id")->value();
+      uint16_t id = std::atoi(id_str.c_str());
+      
+      std::string json = this->parent_->export_pin_code_json(id);
+      if (!json.empty()) {
+        this->send_cors_response(request, 200, "application/json", json);
+      } else {
+        this->send_cors_response(request, 404, "application/json", "{\"error\":\"PIN code not found\"}");
+      }
+      return;
+    }
+    
     this->send_cors_response(request, 404, "application/json", "{\"error\":\"Unknown endpoint\"}");
   }
   
@@ -2444,6 +2462,19 @@ std::string FingerprintDoorbell::get_pin_code_list_json() {
   }
   
   json += "]";
+  return json;
+}
+
+std::string FingerprintDoorbell::export_pin_code_json(uint16_t id) {
+  auto it = this->pin_codes_.find(id);
+  if (it == this->pin_codes_.end()) {
+    return "";  // Not found
+  }
+  
+  // Return full PIN code data for export (including the code)
+  std::string json = "{\"id\":" + std::to_string(id);
+  json += ",\"name\":\"" + it->second.name + "\"";
+  json += ",\"code\":\"" + it->second.code + "\"}";
   return json;
 }
 

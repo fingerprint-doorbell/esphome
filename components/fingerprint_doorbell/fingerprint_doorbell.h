@@ -121,6 +121,7 @@ class FingerprintDoorbell : public Component {
   bool rename_pin_code(uint16_t id, const std::string &new_name);
   bool update_pin_code(uint16_t id, const std::string &new_code);
   std::string get_pin_code_list_json();
+  std::string export_pin_code_json(uint16_t id);
   uint16_t get_pin_code_count();
   bool is_keypad_enabled() { return keypad_enabled_; }
 
