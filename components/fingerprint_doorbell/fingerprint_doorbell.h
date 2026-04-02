@@ -190,6 +190,7 @@ class FingerprintDoorbell : public Component {
   void load_sensor_password();
   void save_sensor_password();
   bool connect_sensor();
+  bool reset_sensor_to_default();
   bool raw_verify_and_reset_password(uint32_t old_password);
   Match scan_fingerprint();
   void process_enrollment();
