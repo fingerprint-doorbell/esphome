@@ -1127,6 +1127,85 @@ bool FingerprintDoorbell::unpair_sensor() {
   return true;
 }
 
+bool FingerprintDoorbell::factory_reset_sensor() {
+  ESP_LOGI(TAG, "Factory resetting sensor...");
+  
+  // Try to connect with default password first
+  if (this->finger_ != nullptr) {
+    delete this->finger_;
+  }
+  this->finger_ = new Adafruit_Fingerprint(this->hw_serial_, 0x00000000);
+  this->finger_->begin(57600);
+  
+  // Try verifying with default password
+  uint8_t result = this->finger_->verifyPassword();
+  if (result != FINGERPRINT_OK) {
+    // Try with stored password if we have one
+    if (this->sensor_password_ != 0xFFFFFFFF) {
+      delete this->finger_;
+      this->finger_ = new Adafruit_Fingerprint(this->hw_serial_, this->sensor_password_);
+      this->finger_->begin(57600);
+      result = this->finger_->verifyPassword();
+    }
+    
+    if (result != FINGERPRINT_OK) {
+      ESP_LOGW(TAG, "Cannot connect to sensor for factory reset - trying without password verification");
+      // Continue anyway - emptyDatabase might still work
+    }
+  }
+  
+  // Delete all fingerprints from sensor
+  result = this->finger_->emptyDatabase();
+  if (result != FINGERPRINT_OK) {
+    ESP_LOGW(TAG, "Failed to empty fingerprint database: error %d", result);
+    // Continue anyway to try resetting password
+  } else {
+    ESP_LOGI(TAG, "Fingerprint database cleared");
+  }
+  
+  // Reset password to default (0x00000000)
+  result = this->finger_->setPassword(0x00000000);
+  if (result != FINGERPRINT_OK) {
+    ESP_LOGW(TAG, "Failed to reset sensor password: error %d", result);
+    // This might fail if we couldn't authenticate - that's ok
+  } else {
+    ESP_LOGI(TAG, "Sensor password reset to default");
+  }
+  
+  // Recreate finger object with default password
+  delete this->finger_;
+  this->finger_ = new Adafruit_Fingerprint(this->hw_serial_, 0x00000000);
+  this->finger_->begin(57600);
+  
+  // Clear local state
+  this->sensor_password_ = 0xFFFFFFFF;
+  this->sensor_paired_ = false;
+  this->save_sensor_password();
+  
+  // Clear stored fingerprint names
+  for (uint16_t i = 1; i <= 200; i++) {
+    std::string key = "fp_" + std::to_string(i);
+    ESPPreferenceObject pref = global_preferences->make_preference<std::array<char, 32>>(fnv1_hash(key.c_str()));
+    std::array<char, 32> empty = {0};
+    pref.save(&empty);
+  }
+  this->fingerprint_names_.clear();
+  
+  // Try to verify connection
+  result = this->finger_->verifyPassword();
+  if (result == FINGERPRINT_OK) {
+    this->sensor_connected_ = true;
+    ESP_LOGI(TAG, "Factory reset complete - sensor connected with default password");
+    this->publish_last_action("Factory reset complete");
+    return true;
+  } else {
+    ESP_LOGW(TAG, "Factory reset attempted but sensor verification failed");
+    this->sensor_connected_ = false;
+    this->publish_last_action("Factory reset - verify failed");
+    return false;
+  }
+}
+
 // ==================== REST API ====================
 
 class FingerprintRequestHandler : public AsyncWebHandler {
@@ -1234,6 +1313,16 @@ class FingerprintRequestHandler : public AsyncWebHandler {
         this->send_cors_response(request, 200, "application/json", "{\"status\":\"unpaired\"}");
       } else {
         this->send_cors_response(request, 500, "application/json", "{\"error\":\"Failed to unpair sensor\"}");
+      }
+      return;
+    }
+    
+    // POST /fingerprint/factory_reset - Factory reset sensor (delete all fingerprints and reset password)
+    if (url == "/fingerprint/factory_reset" && request->method() == HTTP_POST) {
+      if (this->parent_->factory_reset_sensor()) {
+        this->send_cors_response(request, 200, "application/json", "{\"status\":\"factory_reset_complete\"}");
+      } else {
+        this->send_cors_response(request, 500, "application/json", "{\"error\":\"Factory reset failed - sensor may need manual reset\"}");
       }
       return;
     }
