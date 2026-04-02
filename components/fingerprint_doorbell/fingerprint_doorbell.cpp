@@ -1621,24 +1621,20 @@ void FingerprintDoorbell::setup_web_server() {
 // ==================== KEYPAD FUNCTIONS ====================
 
 void FingerprintDoorbell::setup_keypad() {
-  ESP_LOGI(TAG, "Setting up keypad with %d rows and %d cols", 
+  ESP_LOGD(TAG, "Setting up keypad with %d rows and %d cols", 
            this->keypad_row_pins_.size(), this->keypad_col_pins_.size());
   
   // Configure all pins as INPUT_PULLUP initially
   // Row pins will be switched to OUTPUT/LOW during scanning
-  for (size_t i = 0; i < this->keypad_row_pins_.size(); i++) {
-    auto *pin = this->keypad_row_pins_[i];
+  for (auto *pin : this->keypad_row_pins_) {
     pin->setup();
     pin->pin_mode(gpio::FLAG_INPUT | gpio::FLAG_PULLUP);
-    ESP_LOGI(TAG, "Row pin %d configured as INPUT_PULLUP", i);
   }
   
   // Configure column pins as INPUT with PULLUP
-  for (size_t i = 0; i < this->keypad_col_pins_.size(); i++) {
-    auto *pin = this->keypad_col_pins_[i];
+  for (auto *pin : this->keypad_col_pins_) {
     pin->setup();
     pin->pin_mode(gpio::FLAG_INPUT | gpio::FLAG_PULLUP);
-    ESP_LOGI(TAG, "Col pin %d configured as INPUT_PULLUP, current read: %d", i, pin->digital_read());
   }
   
   this->keypad_buffer_.clear();
@@ -1711,7 +1707,7 @@ char FingerprintDoorbell::get_pressed_key() {
         // Key pressed - reset row and return
         this->keypad_row_pins_[row]->digital_write(true);
         this->keypad_row_pins_[row]->pin_mode(gpio::FLAG_INPUT | gpio::FLAG_PULLUP);
-        ESP_LOGI(TAG, "Keypad: row=%d col=%d -> key='%c'", row, col, keys[row][col]);
+        ESP_LOGD(TAG, "Keypad: row=%d col=%d -> key='%c'", row, col, keys[row][col]);
         return keys[row][col];
       }
     }
@@ -1765,14 +1761,15 @@ void FingerprintDoorbell::verify_pin_code() {
       // Match found!
       ESP_LOGI(TAG, "PIN match: ID=%d, Name=%s", pair.first, pair.second.name.c_str());
       
-      // Publish match to sensors
+      // Publish match to PIN-specific sensor only (not fingerprint match sensor)
       if (this->pin_match_name_sensor_ != nullptr) {
         this->pin_match_name_sensor_->publish_state(pair.second.name);
-      }
-      
-      // Also publish to the main match name sensor for unified handling
-      if (this->match_name_sensor_ != nullptr) {
-        this->match_name_sensor_->publish_state("PIN: " + pair.second.name);
+        // Reset PIN match name after 3 seconds
+        this->set_timeout(3000, [this]() {
+          if (this->pin_match_name_sensor_ != nullptr) {
+            this->pin_match_name_sensor_->publish_state("");
+          }
+        });
       }
       
       this->publish_last_action("PIN unlock: " + pair.second.name);
