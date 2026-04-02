@@ -1132,22 +1132,36 @@ bool FingerprintDoorbell::reset_sensor_to_default() {
     return true;
   }
   
-  // Reset password to default
+  // Reset password to default - try library first
   delay(50);
   result = this->finger_->setPassword(0x00000000);
-  if (result != FINGERPRINT_OK) {
-    ESP_LOGW(TAG, "Failed to reset sensor password: error %d", result);
-    return false;
+  if (result == FINGERPRINT_OK) {
+    // Recreate finger object with default password
+    delete this->finger_;
+    this->finger_ = new Adafruit_Fingerprint(this->hw_serial_, 0x00000000);
+    this->finger_->begin(57600);
+    delay(100);
+    
+    ESP_LOGI(TAG, "Sensor reset to default password (via library)");
+    return true;
   }
   
-  // Recreate finger object with default password
-  delete this->finger_;
-  this->finger_ = new Adafruit_Fingerprint(this->hw_serial_, 0x00000000);
-  this->finger_->begin(57600);
-  delay(100);
+  // Library setPassword failed - try raw protocol
+  ESP_LOGW(TAG, "Library setPassword failed: error %d, trying raw protocol...", result);
+  bool raw_ok = this->raw_verify_and_reset_password(connected_password);
+  if (raw_ok) {
+    // Recreate finger object with default password
+    delete this->finger_;
+    this->finger_ = new Adafruit_Fingerprint(this->hw_serial_, 0x00000000);
+    this->finger_->begin(57600);
+    delay(100);
+    
+    ESP_LOGI(TAG, "Sensor reset to default password (via raw protocol)");
+    return true;
+  }
   
-  ESP_LOGI(TAG, "Sensor reset to default password");
-  return true;
+  ESP_LOGW(TAG, "Failed to reset sensor password");
+  return false;
 }
 
 bool FingerprintDoorbell::pair_sensor(uint32_t password) {
@@ -1188,28 +1202,22 @@ bool FingerprintDoorbell::pair_sensor(uint32_t password) {
 }
 
 bool FingerprintDoorbell::unpair_sensor() {
-  if (!this->sensor_connected_ || this->finger_ == nullptr) {
-    ESP_LOGW(TAG, "Cannot unpair: sensor not connected");
-    return false;
-  }
-  
   ESP_LOGI(TAG, "Unpairing sensor (resetting to default password)...");
   
-  // Reset sensor to default password (0x00000000)
-  uint8_t result = this->finger_->setPassword(0x00000000);
-  if (result != FINGERPRINT_OK) {
-    ESP_LOGW(TAG, "Failed to reset sensor password: error %d", result);
+  // Use reset_sensor_to_default which has all the recovery logic
+  // (tries stored password, raw protocol fallback, etc.)
+  bool reset_ok = this->reset_sensor_to_default();
+  
+  if (!reset_ok) {
+    ESP_LOGW(TAG, "Failed to reset sensor to default password");
+    this->publish_last_action("Unpair failed - cannot reset sensor");
     return false;
   }
-  
-  // Recreate finger object with default password
-  delete this->finger_;
-  this->finger_ = new Adafruit_Fingerprint(this->hw_serial_, 0x00000000);
-  this->finger_->begin(57600);
   
   // Update our state
   this->sensor_password_ = 0xFFFFFFFF;  // Marker for "unpaired"
   this->sensor_paired_ = false;
+  this->sensor_connected_ = true;  // We're now connected with default password
   this->save_sensor_password();
   
   ESP_LOGI(TAG, "Sensor unpaired successfully");
