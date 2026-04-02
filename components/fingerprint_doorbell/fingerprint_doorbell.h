@@ -192,6 +192,7 @@ class FingerprintDoorbell : public Component {
   bool connect_sensor();
   bool reset_sensor_to_default();
   bool raw_verify_and_reset_password(uint32_t old_password);
+  bool raw_set_password(uint32_t new_password);
   Match scan_fingerprint();
   void process_enrollment();
   void update_touch_state(bool touched);
