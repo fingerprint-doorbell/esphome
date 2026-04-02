@@ -40,18 +40,17 @@ fingerprint_doorbell:
   api_token: ${api_encryption_key}  # Protects REST API endpoints
 
   # Matrix Keypad 4x3 configuration
-  # Layout: 1-9 on rows 1-3, row 4 has *, 0, #
+  # Layout: rows drive LOW, columns read with pullup
   # * = confirm PIN, # = lock action
-  # Pin mapping determined by auto-scan tool
   keypad_row_pins:
-    - GPIO32  # ROW1 (1,4,7) - Blue wire - PAD 3
-    - GPIO27  # ROW2 (2,5,8) - Yellow wire - PAD 1
-    - GPIO2   # ROW3 (3,6,9) - Orange wire - PAD 6
-    - GPIO4   # ROW4 (*,0,#) - Purple wire - PAD 4
+    - GPIO2   # ROW1 (1,2,3) - White wire - PAD 5
+    - GPIO32  # ROW2 (4,5,6) - Blue wire - PAD 3
+    - GPIO25  # ROW3 (7,8,9) - Green wire - PAD 2
+    - GPIO21  # ROW4 (*,0,#) - Red wire - PAD 7
   keypad_col_pins:
-    - GPIO25  # COL1 (1,2,3) - Green wire - PAD 2
-    - GPIO26  # COL2 (4,5,6) - Red wire - PAD 7
-    - GPIO0   # COL3 (7,8,9,*,0,#) - White wire - PAD 5
+    - GPIO22  # COL1 (1,4,7,*) - Orange wire - PAD 6
+    - GPIO0   # COL2 (2,5,8,0) - Purple wire - PAD 4
+    - GPIO27  # COL3 (3,6,9,#) - Yellow wire - PAD 1
 
   # LED configuration (colors: red, blue, purple)
   # LED modes: breathing, flashing, on, off, gradual_on, gradual_off

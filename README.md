@@ -590,10 +590,12 @@ Same license as the original FingerprintDoorbell project.
 | PAD 1      | ROW2     | IO27       | Yellow      |
 | PAD 2      | COL1     | IO25       | Green       |
 | PAD 3      | ROW1     | IO32       | Blue        |
-| PAD 4      | ROW4     | IO04       | Purple      |
-| PAD 5      | COL3     | IO00       | White       |
-| PAD 6      | ROW3     | IO02       | Orange      |
-| PAD 7      | COL2     | IO26       | Red         |
+| PAD 4      | ROW4     | IO22       | Purple      |
+| PAD 5      | COL3     | IO21       | White       |
+| PAD 6      | ROW3     | IO17       | Orange      |
+| PAD 7      | COL2     | IO16       | Red         |
+
+27, 25, 32, 22, 21, 17, 16
 
 ### Keypad Layout
 ```
