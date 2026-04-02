@@ -1068,15 +1068,56 @@ void FingerprintDoorbell::save_sensor_password() {
 }
 
 bool FingerprintDoorbell::pair_sensor(uint32_t password) {
-  if (!this->sensor_connected_ || this->finger_ == nullptr) {
-    ESP_LOGW(TAG, "Cannot pair: sensor not connected");
+  ESP_LOGI(TAG, "Pairing sensor with password 0x%08X...", password);
+  
+  // First, try to connect with the provided password
+  // This handles the case where sensor already has this password but ESP lost it
+  if (this->finger_ != nullptr) {
+    delete this->finger_;
+  }
+  this->finger_ = new Adafruit_Fingerprint(this->hw_serial_, password);
+  this->finger_->begin(57600);
+  
+  uint8_t result = this->finger_->verifyPassword();
+  if (result == FINGERPRINT_OK) {
+    // Password matches! Sensor already has this password, just save it locally
+    ESP_LOGI(TAG, "Sensor already has this password - reconnected successfully");
+    this->sensor_password_ = password;
+    this->sensor_paired_ = true;
+    this->sensor_connected_ = true;
+    this->save_sensor_password();
+    this->publish_last_action("Sensor paired (reconnected)");
+    return true;
+  }
+  
+  ESP_LOGD(TAG, "Password 0x%08X didn't match (error %d), trying to set new password...", password, result);
+  
+  // Password didn't match - try connecting with current stored password or default
+  uint32_t try_passwords[] = {this->sensor_password_, 0x00000000};
+  bool connected = false;
+  
+  for (uint32_t try_pw : try_passwords) {
+    if (try_pw == 0xFFFFFFFF) continue;  // Skip invalid marker
+    
+    delete this->finger_;
+    this->finger_ = new Adafruit_Fingerprint(this->hw_serial_, try_pw);
+    this->finger_->begin(57600);
+    
+    result = this->finger_->verifyPassword();
+    if (result == FINGERPRINT_OK) {
+      ESP_LOGD(TAG, "Connected with password 0x%08X", try_pw);
+      connected = true;
+      break;
+    }
+  }
+  
+  if (!connected) {
+    ESP_LOGW(TAG, "Cannot connect to sensor with any known password");
     return false;
   }
   
-  ESP_LOGI(TAG, "Pairing sensor with new password...");
-  
-  // Set the new password on the sensor
-  uint8_t result = this->finger_->setPassword(password);
+  // Now set the new password
+  result = this->finger_->setPassword(password);
   if (result != FINGERPRINT_OK) {
     ESP_LOGW(TAG, "Failed to set sensor password: error %d", result);
     return false;
@@ -1087,12 +1128,20 @@ bool FingerprintDoorbell::pair_sensor(uint32_t password) {
   this->finger_ = new Adafruit_Fingerprint(this->hw_serial_, password);
   this->finger_->begin(57600);
   
+  // Verify new password works
+  result = this->finger_->verifyPassword();
+  if (result != FINGERPRINT_OK) {
+    ESP_LOGW(TAG, "Failed to verify new password: error %d", result);
+    return false;
+  }
+  
   // Update our stored password to match
   this->sensor_password_ = password;
   this->sensor_paired_ = true;
+  this->sensor_connected_ = true;
   this->save_sensor_password();
   
-  ESP_LOGI(TAG, "Sensor paired successfully");
+  ESP_LOGI(TAG, "Sensor paired successfully with new password");
   this->publish_last_action("Sensor paired");
   return true;
 }
