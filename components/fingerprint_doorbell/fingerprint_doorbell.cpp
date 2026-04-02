@@ -914,10 +914,79 @@ std::string FingerprintDoorbell::get_fingerprint_list_json() {
     return "[]";
   }
   
-  // Use cached fingerprint names instead of scanning all slots
-  for (const auto& pair : this->fingerprint_names_) {
+  // Get list of enrolled IDs from sensor using ReadIndexTable command (0x1F)
+  // This is much faster than checking each slot individually
+  std::vector<uint16_t> enrolled_ids;
+  
+  // ReadIndexTable command - page 0 covers slots 0-255 (enough for most sensors)
+  uint8_t packet[] = {
+    0xEF, 0x01,             // Header
+    0xFF, 0xFF, 0xFF, 0xFF, // Address
+    0x01,                   // Command packet
+    0x00, 0x04,             // Length (3 bytes + checksum)
+    0x1F,                   // ReadIndexTable command
+    0x00,                   // Page 0 (slots 0-255)
+    0x00, 0x24              // Checksum: 0x01 + 0x00 + 0x04 + 0x1F + 0x00 = 0x24
+  };
+  
+  // Clear buffer and send command
+  while (this->hw_serial_->available()) this->hw_serial_->read();
+  this->hw_serial_->write(packet, sizeof(packet));
+  this->hw_serial_->flush();
+  
+  // Wait for response (12 byte header + 32 byte index table = 44 bytes minimum)
+  uint32_t start = millis();
+  while (this->hw_serial_->available() < 44 && millis() - start < 1000) {
+    delay(10);
+  }
+  
+  // Read response
+  uint8_t response[64];
+  int count = 0;
+  while (this->hw_serial_->available() && count < 64) {
+    response[count++] = this->hw_serial_->read();
+  }
+  
+  // Validate response: header, packet type 0x07 (ACK), and status 0x00 (OK)
+  if (count >= 44 && response[0] == 0xEF && response[1] == 0x01 && 
+      response[6] == 0x07 && response[9] == 0x00) {
+    // Parse index table (32 bytes starting at response[10])
+    // Each bit represents a slot: 1 = occupied, 0 = empty
+    for (int byteIdx = 0; byteIdx < 32; byteIdx++) {
+      uint8_t indexByte = response[10 + byteIdx];
+      for (int bitIdx = 0; bitIdx < 8; bitIdx++) {
+        if (indexByte & (1 << bitIdx)) {
+          uint16_t id = (byteIdx * 8) + bitIdx;
+          enrolled_ids.push_back(id);
+        }
+      }
+    }
+    ESP_LOGD(TAG, "Found %d enrolled fingerprints on sensor", enrolled_ids.size());
+  } else {
+    ESP_LOGW(TAG, "Failed to read index table (count=%d, status=0x%02X), falling back to cached names", 
+             count, count >= 10 ? response[9] : 0xFF);
+    // Fallback: use cached names only
+    for (const auto& pair : this->fingerprint_names_) {
+      if (!first) json += ",";
+      json += "{\"id\":" + std::to_string(pair.first) + ",\"name\":\"" + pair.second + "\"}";
+      first = false;
+    }
+    json += "]";
+    return json;
+  }
+  
+  // Build JSON with all enrolled IDs, using cached name or ID as fallback
+  for (uint16_t id : enrolled_ids) {
     if (!first) json += ",";
-    json += "{\"id\":" + std::to_string(pair.first) + ",\"name\":\"" + pair.second + "\"}";
+    
+    auto it = this->fingerprint_names_.find(id);
+    if (it != this->fingerprint_names_.end() && !it->second.empty()) {
+      // Use stored name
+      json += "{\"id\":" + std::to_string(id) + ",\"name\":\"" + it->second + "\"}";
+    } else {
+      // No name stored, use ID as name
+      json += "{\"id\":" + std::to_string(id) + ",\"name\":\"#" + std::to_string(id) + "\"}";
+    }
     first = false;
   }
   
