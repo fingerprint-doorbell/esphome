@@ -108,7 +108,7 @@ class FingerprintDoorbell : public Component {
   // Sensor pairing - requires password to be set before sensor works
   bool pair_sensor(uint32_t password);
   bool unpair_sensor();
-  bool factory_reset_sensor();
+  bool factory_reset_sensor(uint32_t old_password = 0xFFFFFFFF);
   
   // Template transfer methods for copying fingerprints between devices
   bool get_template(uint16_t id, std::vector<uint8_t> &template_data);
