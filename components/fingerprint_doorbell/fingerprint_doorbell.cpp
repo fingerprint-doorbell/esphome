@@ -1212,6 +1212,7 @@ bool FingerprintDoorbell::factory_reset_sensor(uint32_t old_password) {
   // Try to connect with one of the passwords
   bool connected = false;
   uint8_t result;
+  uint32_t connected_password = 0;
   
   for (uint32_t try_pw : passwords_to_try) {
     if (this->finger_ != nullptr) {
@@ -1224,6 +1225,7 @@ bool FingerprintDoorbell::factory_reset_sensor(uint32_t old_password) {
     if (result == FINGERPRINT_OK) {
       ESP_LOGI(TAG, "Connected with password 0x%08X", try_pw);
       connected = true;
+      connected_password = try_pw;
       break;
     }
   }
@@ -1235,22 +1237,50 @@ bool FingerprintDoorbell::factory_reset_sensor(uint32_t old_password) {
   
   // Now we're connected - do exactly what unpair does, plus clear database
   
-  // Delete all fingerprints from sensor
-  result = this->finger_->emptyDatabase();
+  // Small delay to let sensor settle after connection
+  delay(100);
+  
+  // Read sensor parameters to ensure it's fully ready
+  result = this->finger_->getParameters();
+  ESP_LOGD(TAG, "getParameters result: %d", result);
+  delay(50);
+  
+  // Delete all fingerprints from sensor with retry
+  for (int attempt = 0; attempt < 3; attempt++) {
+    result = this->finger_->emptyDatabase();
+    if (result == FINGERPRINT_OK) {
+      ESP_LOGI(TAG, "Fingerprint database cleared");
+      break;
+    }
+    ESP_LOGD(TAG, "emptyDatabase attempt %d failed with error %d", attempt + 1, result);
+    delay(100);
+  }
   if (result != FINGERPRINT_OK) {
-    ESP_LOGW(TAG, "Failed to empty fingerprint database: error %d", result);
+    ESP_LOGW(TAG, "Failed to empty fingerprint database after retries: error %d", result);
     // Continue anyway to try resetting password
-  } else {
-    ESP_LOGI(TAG, "Fingerprint database cleared");
   }
   
-  // Reset password to default (0x00000000) - same as unpair
-  result = this->finger_->setPassword(0x00000000);
-  if (result != FINGERPRINT_OK) {
-    ESP_LOGW(TAG, "Failed to reset sensor password: error %d", result);
-    return false;
-  }
-  ESP_LOGI(TAG, "Sensor password reset to default");
+  delay(50);
+  
+  // Reset password to default (0x00000000) - only if not already default
+  if (connected_password != 0x00000000) {
+    for (int attempt = 0; attempt < 3; attempt++) {
+      result = this->finger_->setPassword(0x00000000);
+      if (result == FINGERPRINT_OK) {
+        break;
+      }
+      ESP_LOGD(TAG, "setPassword attempt %d failed with error %d", attempt + 1, result);
+      delay(100);
+    }
+    
+    if (result != FINGERPRINT_OK) {
+      ESP_LOGW(TAG, "Failed to reset sensor password after retries: error %d", result);
+      return false;
+    }
+    ESP_LOGI(TAG, "Sensor password reset to default");
+  } else {
+    ESP_LOGI(TAG, "Password already default, skipping setPassword");
+  };
   
   // Recreate finger object with default password
   delete this->finger_;
