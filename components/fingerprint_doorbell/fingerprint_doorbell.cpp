@@ -1339,7 +1339,8 @@ bool FingerprintDoorbell::factory_reset_sensor(uint32_t old_password) {
 bool FingerprintDoorbell::raw_verify_and_reset_password(uint32_t old_password) {
   ESP_LOGI(TAG, "Attempting raw protocol reset with password 0x%08X", old_password);
   
-  // Clear serial buffer
+  // Clear serial buffer thoroughly
+  delay(100);
   while (this->hw_serial_->available()) this->hw_serial_->read();
   delay(50);
   
@@ -1362,7 +1363,12 @@ bool FingerprintDoorbell::raw_verify_and_reset_password(uint32_t old_password) {
   
   this->hw_serial_->write(verify_packet, sizeof(verify_packet));
   this->hw_serial_->flush();
-  delay(100);
+  
+  // Wait for response with timeout
+  uint32_t start = millis();
+  while (this->hw_serial_->available() < 12 && millis() - start < 500) {
+    delay(10);
+  }
   
   // Read response
   uint8_t response[20];
@@ -1371,8 +1377,37 @@ bool FingerprintDoorbell::raw_verify_and_reset_password(uint32_t old_password) {
     response[count++] = this->hw_serial_->read();
   }
   
-  if (count < 10 || response[9] != 0x00) {
-    ESP_LOGW(TAG, "Raw verifyPassword failed (count=%d, code=0x%02X)", count, count >= 10 ? response[9] : 0xFF);
+  // Log full response for debugging
+  if (count > 0) {
+    char hex[64];
+    int pos = 0;
+    for (int i = 0; i < count && pos < 60; i++) {
+      pos += snprintf(hex + pos, 64 - pos, "%02X ", response[i]);
+    }
+    ESP_LOGD(TAG, "Raw verify response (%d bytes): %s", count, hex);
+  }
+  
+  // Check response: header EF 01, then address, then 0x07 (ack), length, confirmation code
+  if (count < 12) {
+    ESP_LOGW(TAG, "Raw verifyPassword: insufficient response (%d bytes)", count);
+    return false;
+  }
+  
+  // Verify header
+  if (response[0] != 0xEF || response[1] != 0x01) {
+    ESP_LOGW(TAG, "Raw verifyPassword: invalid header");
+    return false;
+  }
+  
+  // Byte 6 should be 0x07 (ACK packet)
+  if (response[6] != 0x07) {
+    ESP_LOGW(TAG, "Raw verifyPassword: not an ACK packet (got 0x%02X)", response[6]);
+    return false;
+  }
+  
+  // Byte 9 is confirmation code (0x00 = OK)
+  if (response[9] != 0x00) {
+    ESP_LOGW(TAG, "Raw verifyPassword failed: confirmation code 0x%02X", response[9]);
     return false;
   }
   ESP_LOGI(TAG, "Raw verifyPassword OK");
@@ -1381,6 +1416,7 @@ bool FingerprintDoorbell::raw_verify_and_reset_password(uint32_t old_password) {
   delay(50);
   while (this->hw_serial_->available()) this->hw_serial_->read();
   
+  // Checksum for setPassword: 0x01 + 0x00 + 0x07 + 0x12 + 0 + 0 + 0 + 0 = 0x1A
   uint8_t set_pass_packet[] = {
     0xEF, 0x01,             // Header
     0xFF, 0xFF, 0xFF, 0xFF, // Address
@@ -1393,14 +1429,30 @@ bool FingerprintDoorbell::raw_verify_and_reset_password(uint32_t old_password) {
   
   this->hw_serial_->write(set_pass_packet, sizeof(set_pass_packet));
   this->hw_serial_->flush();
-  delay(100);
+  
+  // Wait for response
+  start = millis();
+  while (this->hw_serial_->available() < 12 && millis() - start < 500) {
+    delay(10);
+  }
   
   count = 0;
   while (this->hw_serial_->available() && count < 20) {
     response[count++] = this->hw_serial_->read();
   }
   
-  if (count >= 10 && response[9] == 0x00) {
+  // Log response
+  if (count > 0) {
+    char hex[64];
+    int pos = 0;
+    for (int i = 0; i < count && pos < 60; i++) {
+      pos += snprintf(hex + pos, 64 - pos, "%02X ", response[i]);
+    }
+    ESP_LOGD(TAG, "Raw setPassword response (%d bytes): %s", count, hex);
+  }
+  
+  if (count >= 12 && response[0] == 0xEF && response[1] == 0x01 && 
+      response[6] == 0x07 && response[9] == 0x00) {
     ESP_LOGI(TAG, "Raw setPassword OK - password reset to default");
     return true;
   }
