@@ -1116,10 +1116,30 @@ bool FingerprintDoorbell::pair_sensor(uint32_t password) {
     return false;
   }
   
-  // Now set the new password
-  result = this->finger_->setPassword(password);
+  // Small delay to let sensor settle after connection
+  delay(100);
+  
+  // Read sensor parameters to ensure it's fully ready
+  result = this->finger_->getParameters();
   if (result != FINGERPRINT_OK) {
-    ESP_LOGW(TAG, "Failed to set sensor password: error %d", result);
+    ESP_LOGW(TAG, "Failed to get sensor parameters: error %d", result);
+    // Continue anyway
+  }
+  
+  delay(50);
+  
+  // Now set the new password with retry
+  for (int attempt = 0; attempt < 3; attempt++) {
+    result = this->finger_->setPassword(password);
+    if (result == FINGERPRINT_OK) {
+      break;
+    }
+    ESP_LOGD(TAG, "setPassword attempt %d failed with error %d, retrying...", attempt + 1, result);
+    delay(100);
+  }
+  
+  if (result != FINGERPRINT_OK) {
+    ESP_LOGW(TAG, "Failed to set sensor password after 3 attempts: error %d", result);
     return false;
   }
   
