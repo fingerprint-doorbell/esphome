@@ -1070,112 +1070,90 @@ void FingerprintDoorbell::save_sensor_password() {
 bool FingerprintDoorbell::pair_sensor(uint32_t password) {
   ESP_LOGI(TAG, "Pairing sensor with password 0x%08X...", password);
   
-  // First, try to connect with the provided password
-  // This handles the case where sensor already has this password but ESP lost it
-  if (this->finger_ != nullptr) {
-    delete this->finger_;
-  }
-  this->finger_ = new Adafruit_Fingerprint(this->hw_serial_, password);
-  this->finger_->begin(57600);
-  
-  // Add delay before first command
-  delay(100);
-  
-  uint8_t result = this->finger_->verifyPassword();
-  ESP_LOGD(TAG, "verifyPassword with 0x%08X returned: %d", password, result);
-  
-  if (result == FINGERPRINT_OK) {
-    // Double-check by reading parameters - this will fail if password is wrong
-    delay(50);
-    uint8_t param_result = this->finger_->getParameters();
-    ESP_LOGD(TAG, "getParameters returned: %d", param_result);
-    
-    if (param_result == FINGERPRINT_OK) {
-      // Password really matches!
-      ESP_LOGI(TAG, "Sensor already has this password - reconnected successfully");
+  // If already connected, try to set new password directly
+  if (this->sensor_connected_ && this->finger_ != nullptr) {
+    uint8_t result = this->finger_->setPassword(password);
+    if (result == FINGERPRINT_OK) {
+      ESP_LOGI(TAG, "Password set successfully on connected sensor");
       this->sensor_password_ = password;
       this->sensor_paired_ = true;
-      this->sensor_connected_ = true;
       this->save_sensor_password();
-      this->publish_last_action("Sensor paired (reconnected)");
+      
+      // Recreate finger object with new password (no immediate verify needed)
+      delete this->finger_;
+      this->finger_ = new Adafruit_Fingerprint(this->hw_serial_, password);
+      this->finger_->begin(57600);
+      
+      this->publish_last_action("Sensor paired");
       return true;
-    } else {
-      ESP_LOGD(TAG, "verifyPassword succeeded but getParameters failed - password mismatch, continuing...");
     }
+    ESP_LOGD(TAG, "setPassword on connected sensor failed: %d, trying reconnect...", result);
   }
   
-  ESP_LOGD(TAG, "Password 0x%08X didn't match, trying to set new password...", password);
-  
-  // Password didn't match - try connecting with current stored password or default
-  uint32_t try_passwords[] = {this->sensor_password_, 0x00000000};
+  // Try to connect with various passwords
+  uint32_t try_passwords[] = {password, this->sensor_password_, 0x00000000};
   bool connected = false;
+  uint8_t result;
   
   for (uint32_t try_pw : try_passwords) {
     if (try_pw == 0xFFFFFFFF) continue;  // Skip invalid marker
     
-    delete this->finger_;
+    if (this->finger_ != nullptr) {
+      delete this->finger_;
+    }
     this->finger_ = new Adafruit_Fingerprint(this->hw_serial_, try_pw);
     this->finger_->begin(57600);
+    delay(100);
     
     result = this->finger_->verifyPassword();
     if (result == FINGERPRINT_OK) {
-      ESP_LOGD(TAG, "Connected with password 0x%08X", try_pw);
-      connected = true;
-      break;
+      // Verify connection is really working
+      result = this->finger_->getParameters();
+      if (result == FINGERPRINT_OK) {
+        ESP_LOGI(TAG, "Connected with password 0x%08X", try_pw);
+        connected = true;
+        
+        // If we connected with the target password, we're done
+        if (try_pw == password) {
+          this->sensor_password_ = password;
+          this->sensor_paired_ = true;
+          this->sensor_connected_ = true;
+          this->save_sensor_password();
+          this->publish_last_action("Sensor paired (reconnected)");
+          return true;
+        }
+        break;
+      }
     }
   }
   
   if (!connected) {
     ESP_LOGW(TAG, "Cannot connect to sensor with any known password");
+    this->publish_last_action("Pairing failed - cannot connect");
     return false;
   }
   
-  // Small delay to let sensor settle after connection
-  delay(100);
-  
-  // Read sensor parameters to ensure it's fully ready
-  result = this->finger_->getParameters();
-  if (result != FINGERPRINT_OK) {
-    ESP_LOGW(TAG, "Failed to get sensor parameters: error %d", result);
-    // Continue anyway
-  }
-  
+  // Connected with different password - set new password
   delay(50);
-  
-  // Now set the new password with retry
-  for (int attempt = 0; attempt < 3; attempt++) {
-    result = this->finger_->setPassword(password);
-    if (result == FINGERPRINT_OK) {
-      break;
-    }
-    ESP_LOGD(TAG, "setPassword attempt %d failed with error %d, retrying...", attempt + 1, result);
-    delay(100);
-  }
-  
+  result = this->finger_->setPassword(password);
   if (result != FINGERPRINT_OK) {
-    ESP_LOGW(TAG, "Failed to set sensor password after 3 attempts: error %d", result);
+    ESP_LOGW(TAG, "Failed to set sensor password: error %d", result);
+    this->publish_last_action("Pairing failed - setPassword error");
     return false;
   }
   
-  // Recreate finger object with new password for future communications
+  // Update state - don't verify immediately, next connect_sensor() will do that
+  this->sensor_password_ = password;
+  this->sensor_paired_ = true;
+  this->save_sensor_password();
+  
+  // Recreate finger object with new password
   delete this->finger_;
   this->finger_ = new Adafruit_Fingerprint(this->hw_serial_, password);
   this->finger_->begin(57600);
-  
-  // Verify new password works
-  result = this->finger_->verifyPassword();
-  if (result != FINGERPRINT_OK) {
-    ESP_LOGW(TAG, "Failed to verify new password: error %d", result);
-    return false;
-  }
-  
-  // Update our stored password to match
-  this->sensor_password_ = password;
-  this->sensor_paired_ = true;
   this->sensor_connected_ = true;
-  this->save_sensor_password();
   
-  ESP_LOGI(TAG, "Sensor paired successfully with new password");
+  ESP_LOGI(TAG, "Sensor paired successfully");
   this->publish_last_action("Sensor paired");
   return true;
 }
@@ -1223,7 +1201,7 @@ bool FingerprintDoorbell::factory_reset_sensor(uint32_t old_password) {
   }
   passwords_to_try.push_back(0x00000000);  // Default password last
   
-  // Try to connect with one of the passwords
+  // Try to connect with one of the passwords using library
   bool connected = false;
   uint8_t result;
   uint32_t connected_password = 0;
@@ -1234,78 +1212,70 @@ bool FingerprintDoorbell::factory_reset_sensor(uint32_t old_password) {
     }
     this->finger_ = new Adafruit_Fingerprint(this->hw_serial_, try_pw);
     this->finger_->begin(57600);
+    delay(100);
     
     result = this->finger_->verifyPassword();
     if (result == FINGERPRINT_OK) {
-      ESP_LOGI(TAG, "Connected with password 0x%08X", try_pw);
-      connected = true;
-      connected_password = try_pw;
-      break;
+      // Verify with getParameters
+      result = this->finger_->getParameters();
+      if (result == FINGERPRINT_OK) {
+        ESP_LOGI(TAG, "Connected with password 0x%08X", try_pw);
+        connected = true;
+        connected_password = try_pw;
+        break;
+      }
+    }
+  }
+  
+  // If library connection failed, try raw protocol with user-provided password
+  if (!connected && old_password != 0xFFFFFFFF) {
+    ESP_LOGI(TAG, "Library connection failed, trying raw protocol with provided password...");
+    connected = this->raw_verify_and_reset_password(old_password);
+    if (connected) {
+      // Raw reset succeeded - sensor is now at default password
+      connected_password = 0x00000000;
+      
+      // Recreate finger object with default password
+      if (this->finger_ != nullptr) {
+        delete this->finger_;
+      }
+      this->finger_ = new Adafruit_Fingerprint(this->hw_serial_, 0x00000000);
+      this->finger_->begin(57600);
+      delay(100);
     }
   }
   
   if (!connected) {
     ESP_LOGW(TAG, "Cannot connect to sensor with any known password");
+    this->publish_last_action("Factory reset failed - cannot connect");
     return false;
   }
   
-  // Now we're connected - do exactly what unpair does, plus clear database
-  
-  // Small delay to let sensor settle after connection
-  delay(100);
-  
-  // Read sensor parameters to ensure it's fully ready
-  result = this->finger_->getParameters();
-  ESP_LOGD(TAG, "getParameters result: %d", result);
+  // Delete all fingerprints from sensor
   delay(50);
-  
-  // Delete all fingerprints from sensor with retry
-  for (int attempt = 0; attempt < 3; attempt++) {
-    result = this->finger_->emptyDatabase();
-    if (result == FINGERPRINT_OK) {
-      ESP_LOGI(TAG, "Fingerprint database cleared");
-      break;
-    }
-    ESP_LOGD(TAG, "emptyDatabase attempt %d failed with error %d", attempt + 1, result);
-    delay(100);
-  }
+  result = this->finger_->emptyDatabase();
   if (result != FINGERPRINT_OK) {
-    ESP_LOGW(TAG, "Failed to empty fingerprint database after retries: error %d", result);
-    // Continue anyway to try resetting password
+    ESP_LOGW(TAG, "Failed to empty fingerprint database: error %d", result);
+    // Continue anyway
+  } else {
+    ESP_LOGI(TAG, "Fingerprint database cleared");
   }
   
-  delay(50);
-  
-  // Reset password to default (0x00000000) - only if not already default
+  // Reset password to default if not already
   if (connected_password != 0x00000000) {
-    for (int attempt = 0; attempt < 3; attempt++) {
-      result = this->finger_->setPassword(0x00000000);
-      if (result == FINGERPRINT_OK) {
-        break;
-      }
-      ESP_LOGD(TAG, "setPassword attempt %d failed with error %d", attempt + 1, result);
-      delay(100);
-    }
-    
+    delay(50);
+    result = this->finger_->setPassword(0x00000000);
     if (result != FINGERPRINT_OK) {
-      ESP_LOGW(TAG, "Failed to reset sensor password after retries: error %d", result);
+      ESP_LOGW(TAG, "Failed to reset sensor password: error %d", result);
+      this->publish_last_action("Factory reset failed - password reset error");
       return false;
     }
     ESP_LOGI(TAG, "Sensor password reset to default");
-  } else {
-    ESP_LOGI(TAG, "Password already default, skipping setPassword");
-  };
-  
-  // Recreate finger object with default password
-  delete this->finger_;
-  this->finger_ = new Adafruit_Fingerprint(this->hw_serial_, 0x00000000);
-  this->finger_->begin(57600);
-  
-  // Verify connection works
-  result = this->finger_->verifyPassword();
-  if (result != FINGERPRINT_OK) {
-    ESP_LOGW(TAG, "Failed to verify default password after reset: error %d", result);
-    return false;
+    
+    // Recreate finger object with default password
+    delete this->finger_;
+    this->finger_ = new Adafruit_Fingerprint(this->hw_serial_, 0x00000000);
+    this->finger_->begin(57600);
   }
   
   // Update our state
@@ -1326,6 +1296,80 @@ bool FingerprintDoorbell::factory_reset_sensor(uint32_t old_password) {
   ESP_LOGI(TAG, "Factory reset complete");
   this->publish_last_action("Factory reset complete");
   return true;
+}
+
+// Raw protocol helper for factory reset when password is unknown to library
+bool FingerprintDoorbell::raw_verify_and_reset_password(uint32_t old_password) {
+  ESP_LOGI(TAG, "Attempting raw protocol reset with password 0x%08X", old_password);
+  
+  // Clear serial buffer
+  while (this->hw_serial_->available()) this->hw_serial_->read();
+  delay(50);
+  
+  // Build verifyPassword packet (command 0x13)
+  uint8_t p0 = (old_password >> 24) & 0xFF;
+  uint8_t p1 = (old_password >> 16) & 0xFF;
+  uint8_t p2 = (old_password >> 8) & 0xFF;
+  uint8_t p3 = old_password & 0xFF;
+  uint16_t checksum = 0x01 + 0x00 + 0x07 + 0x13 + p0 + p1 + p2 + p3;
+  
+  uint8_t verify_packet[] = {
+    0xEF, 0x01,             // Header
+    0xFF, 0xFF, 0xFF, 0xFF, // Address
+    0x01,                   // Command packet
+    0x00, 0x07,             // Length
+    0x13,                   // verifyPassword command
+    p0, p1, p2, p3,         // Password
+    (uint8_t)(checksum >> 8), (uint8_t)(checksum & 0xFF)
+  };
+  
+  this->hw_serial_->write(verify_packet, sizeof(verify_packet));
+  this->hw_serial_->flush();
+  delay(100);
+  
+  // Read response
+  uint8_t response[20];
+  int count = 0;
+  while (this->hw_serial_->available() && count < 20) {
+    response[count++] = this->hw_serial_->read();
+  }
+  
+  if (count < 10 || response[9] != 0x00) {
+    ESP_LOGW(TAG, "Raw verifyPassword failed (count=%d, code=0x%02X)", count, count >= 10 ? response[9] : 0xFF);
+    return false;
+  }
+  ESP_LOGI(TAG, "Raw verifyPassword OK");
+  
+  // Now send setPassword to reset to 0x00000000
+  delay(50);
+  while (this->hw_serial_->available()) this->hw_serial_->read();
+  
+  uint8_t set_pass_packet[] = {
+    0xEF, 0x01,             // Header
+    0xFF, 0xFF, 0xFF, 0xFF, // Address
+    0x01,                   // Command packet
+    0x00, 0x07,             // Length
+    0x12,                   // setPassword command
+    0x00, 0x00, 0x00, 0x00, // New password (0x00000000)
+    0x00, 0x1A              // Checksum
+  };
+  
+  this->hw_serial_->write(set_pass_packet, sizeof(set_pass_packet));
+  this->hw_serial_->flush();
+  delay(100);
+  
+  count = 0;
+  while (this->hw_serial_->available() && count < 20) {
+    response[count++] = this->hw_serial_->read();
+  }
+  
+  if (count >= 10 && response[9] == 0x00) {
+    ESP_LOGI(TAG, "Raw setPassword OK - password reset to default");
+    return true;
+  }
+  
+  ESP_LOGW(TAG, "Raw setPassword failed (count=%d, code=0x%02X)", count, count >= 10 ? response[9] : 0xFF);
+  return false;
 }
 
 // ==================== REST API ====================
