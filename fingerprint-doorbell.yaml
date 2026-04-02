@@ -86,6 +86,11 @@ fingerprint_doorbell:
   led_enroll_mode: flashing
   led_enroll_speed: 25
 
+  # Unlock action minimum confidence (0-255, default 80)
+  # Fingerprint must have at least this confidence to trigger unlock
+  # PIN codes always trigger unlock regardless of this setting
+  min_unlock_confidence: 80
+
 
 # Sensors
 sensor:
@@ -129,3 +134,6 @@ binary_sensor:
     lock_action:
       name: "Lock Action"
       id: fp_lock_action
+    unlock_action:
+      name: "Unlock Action"
+      id: fp_unlock_action

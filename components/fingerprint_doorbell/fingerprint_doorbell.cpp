@@ -108,6 +108,9 @@ void FingerprintDoorbell::loop() {
     if (this->match_name_sensor_ != nullptr)
       this->match_name_sensor_->publish_state(match.match_name);
     
+    // Trigger unlock action (with confidence check)
+    this->trigger_unlock_action(match.match_confidence);
+    
     this->publish_last_action("Match: " + match.match_name);
     this->last_match_time_ = millis();
     this->last_match_id_ = match.match_id;
@@ -2249,6 +2252,9 @@ void FingerprintDoorbell::verify_pin_code() {
       
       this->publish_last_action("PIN unlock: " + pair.second.name);
       
+      // Trigger unlock action (255 = PIN code, always unlock)
+      this->trigger_unlock_action(255);
+      
       // Set LED to match state (pink) - will reset after 1 second via loop()
       this->set_led_ring_match();
       this->last_match_time_ = millis();
@@ -2285,6 +2291,23 @@ void FingerprintDoorbell::trigger_lock_action() {
   }
   
   this->publish_last_action("Lock triggered");
+}
+
+void FingerprintDoorbell::trigger_unlock_action(uint16_t confidence) {
+  // Check confidence threshold (255 means PIN code, always unlock)
+  if (confidence < this->min_unlock_confidence_ && confidence != 255) {
+    ESP_LOGW(TAG, "Unlock action skipped: confidence %d < min %d", confidence, this->min_unlock_confidence_);
+    return;
+  }
+  
+  ESP_LOGI(TAG, "Unlock action triggered (confidence: %d)", confidence);
+  
+  if (this->unlock_action_sensor_ != nullptr) {
+    this->unlock_action_sensor_->publish_state(true);
+    this->set_timeout(1000, [this]() {
+      this->unlock_action_sensor_->publish_state(false);
+    });
+  }
 }
 
 // ==================== PIN CODE STORAGE ====================

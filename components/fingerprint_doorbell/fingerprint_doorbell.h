@@ -89,6 +89,8 @@ class FingerprintDoorbell : public Component {
   void set_pin_match_name_sensor(text_sensor::TextSensor *sensor) { pin_match_name_sensor_ = sensor; }
   void set_pin_invalid_sensor(binary_sensor::BinarySensor *sensor) { pin_invalid_sensor_ = sensor; }
   void set_lock_action_sensor(binary_sensor::BinarySensor *sensor) { lock_action_sensor_ = sensor; }
+  void set_unlock_action_sensor(binary_sensor::BinarySensor *sensor) { unlock_action_sensor_ = sensor; }
+  void set_min_unlock_confidence(uint8_t confidence) { min_unlock_confidence_ = confidence; }
 
   // Public methods for HA services and REST API
   void start_enrollment(uint16_t id, const std::string &name);
@@ -140,6 +142,9 @@ class FingerprintDoorbell : public Component {
   LedConfig led_scanning_{2, 2, 25};  // blue, flashing, speed 25
   LedConfig led_no_match_{1, 2, 25};  // red, flashing, speed 25
 
+  // Unlock action configuration
+  uint8_t min_unlock_confidence_{80};
+
   // Sensors
   sensor::Sensor *match_id_sensor_{nullptr};
   sensor::Sensor *confidence_sensor_{nullptr};
@@ -151,6 +156,7 @@ class FingerprintDoorbell : public Component {
   text_sensor::TextSensor *pin_match_name_sensor_{nullptr};
   binary_sensor::BinarySensor *pin_invalid_sensor_{nullptr};
   binary_sensor::BinarySensor *lock_action_sensor_{nullptr};
+  binary_sensor::BinarySensor *unlock_action_sensor_{nullptr};
 
   // Internal state
   Adafruit_Fingerprint *finger_{nullptr};
@@ -219,6 +225,7 @@ class FingerprintDoorbell : public Component {
   void process_keypad_input(char key);
   void verify_pin_code();
   void trigger_lock_action();
+  void trigger_unlock_action(uint16_t confidence = 255);
   void load_pin_codes();
   void save_pin_code(uint16_t id, const std::string &code, const std::string &name);
   void delete_pin_code_storage(uint16_t id);

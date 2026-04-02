@@ -15,6 +15,7 @@ CONF_RING = "ring"
 CONF_FINGER = "finger"
 CONF_PIN_INVALID = "pin_invalid"
 CONF_LOCK_ACTION = "lock_action"
+CONF_UNLOCK_ACTION = "unlock_action"
 
 CONFIG_SCHEMA = cv.Schema(
     {
@@ -32,6 +33,9 @@ CONFIG_SCHEMA = cv.Schema(
         cv.Optional(CONF_LOCK_ACTION): binary_sensor.binary_sensor_schema(
             device_class=DEVICE_CLASS_LOCK,
             icon="mdi:lock",
+        ),
+        cv.Optional(CONF_UNLOCK_ACTION): binary_sensor.binary_sensor_schema(
+            icon="mdi:lock-open",
         ),
     }
 )
@@ -55,3 +59,7 @@ async def to_code(config):
     if CONF_LOCK_ACTION in config:
         sens = await binary_sensor.new_binary_sensor(config[CONF_LOCK_ACTION])
         cg.add(parent.set_lock_action_sensor(sens))
+
+    if CONF_UNLOCK_ACTION in config:
+        sens = await binary_sensor.new_binary_sensor(config[CONF_UNLOCK_ACTION])
+        cg.add(parent.set_unlock_action_sensor(sens))

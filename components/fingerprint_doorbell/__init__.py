@@ -35,6 +35,9 @@ CONF_LED_NO_MATCH_COLOR = "led_no_match_color"
 CONF_LED_NO_MATCH_MODE = "led_no_match_mode"
 CONF_LED_NO_MATCH_SPEED = "led_no_match_speed"
 
+# Unlock action configuration
+CONF_MIN_UNLOCK_CONFIDENCE = "min_unlock_confidence"
+
 # LED color enum values (matching Adafruit library)
 LED_COLORS = {
     "red": 1,
@@ -104,6 +107,8 @@ CONFIG_SCHEMA = cv.Schema(
         cv.Optional(CONF_LED_NO_MATCH_COLOR): cv.one_of(*LED_COLORS, lower=True),
         cv.Optional(CONF_LED_NO_MATCH_MODE): cv.one_of(*LED_MODES, lower=True),
         cv.Optional(CONF_LED_NO_MATCH_SPEED): cv.int_range(min=0, max=255),
+        # Unlock action minimum confidence (default 80)
+        cv.Optional(CONF_MIN_UNLOCK_CONFIDENCE, default=80): cv.int_range(min=0, max=255),
     }
 ).extend(cv.COMPONENT_SCHEMA)
 
@@ -274,3 +279,6 @@ async def to_code(config):
             LED_MODES.get(config.get(CONF_LED_NO_MATCH_MODE), 2),    # default flashing
             config.get(CONF_LED_NO_MATCH_SPEED, 25)
         ))
+
+    # Minimum confidence for unlock action
+    cg.add(var.set_min_unlock_confidence(config[CONF_MIN_UNLOCK_CONFIDENCE]))
