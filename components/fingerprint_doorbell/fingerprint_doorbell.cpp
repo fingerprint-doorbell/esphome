@@ -1624,17 +1624,21 @@ void FingerprintDoorbell::setup_keypad() {
   ESP_LOGI(TAG, "Setting up keypad with %d rows and %d cols", 
            this->keypad_row_pins_.size(), this->keypad_col_pins_.size());
   
-  // Configure row pins as OUTPUT, initially HIGH (inactive)
-  for (auto *pin : this->keypad_row_pins_) {
+  // Configure all pins as INPUT_PULLUP initially
+  // Row pins will be switched to OUTPUT/LOW during scanning
+  for (size_t i = 0; i < this->keypad_row_pins_.size(); i++) {
+    auto *pin = this->keypad_row_pins_[i];
     pin->setup();
-    pin->pin_mode(gpio::FLAG_OUTPUT);
-    pin->digital_write(true);  // HIGH = inactive
+    pin->pin_mode(gpio::FLAG_INPUT | gpio::FLAG_PULLUP);
+    ESP_LOGI(TAG, "Row pin %d configured as INPUT_PULLUP", i);
   }
   
   // Configure column pins as INPUT with PULLUP
-  for (auto *pin : this->keypad_col_pins_) {
+  for (size_t i = 0; i < this->keypad_col_pins_.size(); i++) {
+    auto *pin = this->keypad_col_pins_[i];
     pin->setup();
     pin->pin_mode(gpio::FLAG_INPUT | gpio::FLAG_PULLUP);
+    ESP_LOGI(TAG, "Col pin %d configured as INPUT_PULLUP, current read: %d", i, pin->digital_read());
   }
   
   this->keypad_buffer_.clear();
@@ -1688,20 +1692,33 @@ char FingerprintDoorbell::get_pressed_key() {
     {'*', '0', '#'}
   };
   
+  // Ensure column pins are INPUT_PULLUP before each scan
+  for (auto *pin : this->keypad_col_pins_) {
+    pin->pin_mode(gpio::FLAG_INPUT | gpio::FLAG_PULLUP);
+  }
+  delayMicroseconds(10);
+  
   // Scan each row
   for (size_t row = 0; row < this->keypad_row_pins_.size() && row < 4; row++) {
-    this->keypad_row_pins_[row]->digital_write(false);  // Activate row (LOW)
+    // Set current row to OUTPUT LOW
+    this->keypad_row_pins_[row]->pin_mode(gpio::FLAG_OUTPUT);
+    this->keypad_row_pins_[row]->digital_write(false);
     delayMicroseconds(50);
     
     for (size_t col = 0; col < this->keypad_col_pins_.size() && col < 3; col++) {
-      if (!this->keypad_col_pins_[col]->digital_read()) {
-        this->keypad_row_pins_[row]->digital_write(true);  // Deactivate row
+      bool col_state = this->keypad_col_pins_[col]->digital_read();
+      if (!col_state) {
+        // Key pressed - reset row and return
+        this->keypad_row_pins_[row]->digital_write(true);
+        this->keypad_row_pins_[row]->pin_mode(gpio::FLAG_INPUT | gpio::FLAG_PULLUP);
         ESP_LOGI(TAG, "Keypad: row=%d col=%d -> key='%c'", row, col, keys[row][col]);
         return keys[row][col];
       }
     }
     
-    this->keypad_row_pins_[row]->digital_write(true);  // Deactivate row
+    // Reset row to INPUT (high-impedance)
+    this->keypad_row_pins_[row]->digital_write(true);
+    this->keypad_row_pins_[row]->pin_mode(gpio::FLAG_INPUT | gpio::FLAG_PULLUP);
   }
   
   return 0;  // No key pressed
