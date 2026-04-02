@@ -34,11 +34,22 @@ void FingerprintDoorbell::setup() {
   this->sensor_connected_ = false;
   this->mode_ = Mode::SCAN;
   
+  // Setup keypad if configured
+  if (this->keypad_enabled_) {
+    this->setup_keypad();
+    this->load_pin_codes();
+  }
+  
   // Setup REST API
   this->setup_web_server();
 }
 
 void FingerprintDoorbell::loop() {
+  // Scan keypad if enabled (always, independent of fingerprint sensor)
+  if (this->keypad_enabled_) {
+    this->scan_keypad();
+  }
+  
   // Connect sensor if not connected (throttled to every 5 seconds)
   if (!this->sensor_connected_) {
     uint32_t now = millis();
@@ -96,6 +107,9 @@ void FingerprintDoorbell::loop() {
       this->confidence_sensor_->publish_state(match.match_confidence);
     if (this->match_name_sensor_ != nullptr)
       this->match_name_sensor_->publish_state(match.match_name);
+    
+    // Trigger unlock action (with confidence check)
+    this->trigger_unlock_action(match.match_confidence);
     
     this->publish_last_action("Match: " + match.match_name);
     this->last_match_time_ = millis();
@@ -903,10 +917,79 @@ std::string FingerprintDoorbell::get_fingerprint_list_json() {
     return "[]";
   }
   
-  // Use cached fingerprint names instead of scanning all slots
-  for (const auto& pair : this->fingerprint_names_) {
+  // Get list of enrolled IDs from sensor using ReadIndexTable command (0x1F)
+  // This is much faster than checking each slot individually
+  std::vector<uint16_t> enrolled_ids;
+  
+  // ReadIndexTable command - page 0 covers slots 0-255 (enough for most sensors)
+  uint8_t packet[] = {
+    0xEF, 0x01,             // Header
+    0xFF, 0xFF, 0xFF, 0xFF, // Address
+    0x01,                   // Command packet
+    0x00, 0x04,             // Length (3 bytes + checksum)
+    0x1F,                   // ReadIndexTable command
+    0x00,                   // Page 0 (slots 0-255)
+    0x00, 0x24              // Checksum: 0x01 + 0x00 + 0x04 + 0x1F + 0x00 = 0x24
+  };
+  
+  // Clear buffer and send command
+  while (this->hw_serial_->available()) this->hw_serial_->read();
+  this->hw_serial_->write(packet, sizeof(packet));
+  this->hw_serial_->flush();
+  
+  // Wait for response (12 byte header + 32 byte index table = 44 bytes minimum)
+  uint32_t start = millis();
+  while (this->hw_serial_->available() < 44 && millis() - start < 1000) {
+    delay(10);
+  }
+  
+  // Read response
+  uint8_t response[64];
+  int count = 0;
+  while (this->hw_serial_->available() && count < 64) {
+    response[count++] = this->hw_serial_->read();
+  }
+  
+  // Validate response: header, packet type 0x07 (ACK), and status 0x00 (OK)
+  if (count >= 44 && response[0] == 0xEF && response[1] == 0x01 && 
+      response[6] == 0x07 && response[9] == 0x00) {
+    // Parse index table (32 bytes starting at response[10])
+    // Each bit represents a slot: 1 = occupied, 0 = empty
+    for (int byteIdx = 0; byteIdx < 32; byteIdx++) {
+      uint8_t indexByte = response[10 + byteIdx];
+      for (int bitIdx = 0; bitIdx < 8; bitIdx++) {
+        if (indexByte & (1 << bitIdx)) {
+          uint16_t id = (byteIdx * 8) + bitIdx;
+          enrolled_ids.push_back(id);
+        }
+      }
+    }
+    ESP_LOGD(TAG, "Found %d enrolled fingerprints on sensor", enrolled_ids.size());
+  } else {
+    ESP_LOGW(TAG, "Failed to read index table (count=%d, status=0x%02X), falling back to cached names", 
+             count, count >= 10 ? response[9] : 0xFF);
+    // Fallback: use cached names only
+    for (const auto& pair : this->fingerprint_names_) {
+      if (!first) json += ",";
+      json += "{\"id\":" + std::to_string(pair.first) + ",\"name\":\"" + pair.second + "\"}";
+      first = false;
+    }
+    json += "]";
+    return json;
+  }
+  
+  // Build JSON with all enrolled IDs, using cached name or ID as fallback
+  for (uint16_t id : enrolled_ids) {
     if (!first) json += ",";
-    json += "{\"id\":" + std::to_string(pair.first) + ",\"name\":\"" + pair.second + "\"}";
+    
+    auto it = this->fingerprint_names_.find(id);
+    if (it != this->fingerprint_names_.end() && !it->second.empty()) {
+      // Use stored name
+      json += "{\"id\":" + std::to_string(id) + ",\"name\":\"" + it->second + "\"}";
+    } else {
+      // No name stored, use ID as name
+      json += "{\"id\":" + std::to_string(id) + ",\"name\":\"#" + std::to_string(id) + "\"}";
+    }
     first = false;
   }
   
@@ -1056,30 +1139,87 @@ void FingerprintDoorbell::save_sensor_password() {
   ESP_LOGI(TAG, "Saved sensor password to preferences");
 }
 
+bool FingerprintDoorbell::reset_sensor_to_default() {
+  ESP_LOGI(TAG, "Resetting sensor to default password...");
+  
+  // CRITICAL: Reinitialize serial to ensure clean state
+  // This is necessary because the Adafruit library can corrupt UART communication
+  mySerial.end();
+  delay(50);
+  mySerial.begin(57600, SERIAL_8N1, 16, 17);
+  delay(100);
+  
+  // Clear any garbage in the serial buffer
+  while (this->hw_serial_->available()) this->hw_serial_->read();
+  
+  // Build list of passwords to try - include common passwords
+  std::vector<uint32_t> passwords_to_try;
+  if (this->sensor_password_ != 0xFFFFFFFF && this->sensor_password_ != 0x00000000) {
+    passwords_to_try.push_back(this->sensor_password_);  // Stored password first
+  }
+  passwords_to_try.push_back(0x00000000);  // Default password
+  passwords_to_try.push_back(0x12345678);  // Common password
+  passwords_to_try.push_back(0xFFFFFFFF);  // Another common one
+  
+  // Try to connect with one of the passwords using raw protocol
+  // (more reliable than the library which has issues after begin())
+  for (uint32_t try_pw : passwords_to_try) {
+    ESP_LOGD(TAG, "Trying password 0x%08X...", try_pw);
+    
+    if (this->raw_verify_and_reset_password(try_pw)) {
+      // Success! Sensor is now at default password
+      if (this->finger_ != nullptr) {
+        delete this->finger_;
+      }
+      this->finger_ = new Adafruit_Fingerprint(this->hw_serial_, 0x00000000);
+      this->finger_->begin(57600);
+      delay(100);
+      
+      ESP_LOGI(TAG, "Sensor reset to default password (was 0x%08X)", try_pw);
+      return true;
+    }
+  }
+  
+  ESP_LOGW(TAG, "Cannot connect to sensor with any known password");
+  return false;
+}
+
 bool FingerprintDoorbell::pair_sensor(uint32_t password) {
-  if (!this->sensor_connected_ || this->finger_ == nullptr) {
-    ESP_LOGW(TAG, "Cannot pair: sensor not connected");
+  ESP_LOGI(TAG, "Pairing sensor with password 0x%08X...", password);
+  
+  // Step 1: Try to reset sensor to default password first
+  // This ensures we start from a known state
+  bool reset_ok = this->reset_sensor_to_default();
+  
+  if (!reset_ok) {
+    ESP_LOGW(TAG, "Could not reset sensor to default password");
+    this->publish_last_action("Pairing failed - cannot reset sensor");
     return false;
   }
   
-  ESP_LOGI(TAG, "Pairing sensor with new password...");
-  
-  // Set the new password on the sensor
+  // Step 2: Now sensor is at default password, set the new password
+  // Try library first, then raw protocol as fallback
+  delay(50);
   uint8_t result = this->finger_->setPassword(password);
   if (result != FINGERPRINT_OK) {
-    ESP_LOGW(TAG, "Failed to set sensor password: error %d", result);
-    return false;
+    ESP_LOGW(TAG, "Library setPassword failed: error %d, trying raw protocol...", result);
+    
+    if (!this->raw_set_password(password)) {
+      ESP_LOGE(TAG, "Raw setPassword also failed");
+      this->publish_last_action("Pairing failed - setPassword error");
+      return false;
+    }
   }
   
-  // Recreate finger object with new password for future communications
+  // Step 3: Update state and recreate finger object
+  this->sensor_password_ = password;
+  this->sensor_paired_ = true;
+  this->sensor_connected_ = true;
+  this->save_sensor_password();
+  
   delete this->finger_;
   this->finger_ = new Adafruit_Fingerprint(this->hw_serial_, password);
   this->finger_->begin(57600);
-  
-  // Update our stored password to match
-  this->sensor_password_ = password;
-  this->sensor_paired_ = true;
-  this->save_sensor_password();
   
   ESP_LOGI(TAG, "Sensor paired successfully");
   this->publish_last_action("Sensor paired");
@@ -1087,33 +1227,323 @@ bool FingerprintDoorbell::pair_sensor(uint32_t password) {
 }
 
 bool FingerprintDoorbell::unpair_sensor() {
-  if (!this->sensor_connected_ || this->finger_ == nullptr) {
-    ESP_LOGW(TAG, "Cannot unpair: sensor not connected");
-    return false;
-  }
-  
   ESP_LOGI(TAG, "Unpairing sensor (resetting to default password)...");
   
-  // Reset sensor to default password (0x00000000)
-  uint8_t result = this->finger_->setPassword(0x00000000);
-  if (result != FINGERPRINT_OK) {
-    ESP_LOGW(TAG, "Failed to reset sensor password: error %d", result);
+  // Use reset_sensor_to_default which has all the recovery logic
+  // (tries stored password, raw protocol fallback, etc.)
+  bool reset_ok = this->reset_sensor_to_default();
+  
+  if (!reset_ok) {
+    ESP_LOGW(TAG, "Failed to reset sensor to default password");
+    this->publish_last_action("Unpair failed - cannot reset sensor");
     return false;
   }
-  
-  // Recreate finger object with default password
-  delete this->finger_;
-  this->finger_ = new Adafruit_Fingerprint(this->hw_serial_, 0x00000000);
-  this->finger_->begin(57600);
   
   // Update our state
   this->sensor_password_ = 0xFFFFFFFF;  // Marker for "unpaired"
   this->sensor_paired_ = false;
+  this->sensor_connected_ = true;  // We're now connected with default password
   this->save_sensor_password();
   
   ESP_LOGI(TAG, "Sensor unpaired successfully");
   this->publish_last_action("Sensor unpaired");
   return true;
+}
+
+bool FingerprintDoorbell::factory_reset_sensor(uint32_t old_password) {
+  ESP_LOGI(TAG, "Factory resetting sensor...");
+  
+  // Build list of passwords to try
+  std::vector<uint32_t> passwords_to_try;
+  if (old_password != 0xFFFFFFFF) {
+    passwords_to_try.push_back(old_password);  // User-provided password first
+  }
+  if (this->sensor_password_ != 0xFFFFFFFF) {
+    passwords_to_try.push_back(this->sensor_password_);  // Stored password
+  }
+  passwords_to_try.push_back(0x00000000);  // Default password last
+  
+  // Try to connect with one of the passwords using library
+  bool connected = false;
+  uint8_t result;
+  uint32_t connected_password = 0;
+  
+  for (uint32_t try_pw : passwords_to_try) {
+    if (this->finger_ != nullptr) {
+      delete this->finger_;
+    }
+    this->finger_ = new Adafruit_Fingerprint(this->hw_serial_, try_pw);
+    this->finger_->begin(57600);
+    delay(100);
+    
+    result = this->finger_->verifyPassword();
+    if (result == FINGERPRINT_OK) {
+      // Verify with getParameters
+      result = this->finger_->getParameters();
+      if (result == FINGERPRINT_OK) {
+        ESP_LOGI(TAG, "Connected with password 0x%08X", try_pw);
+        connected = true;
+        connected_password = try_pw;
+        break;
+      }
+    }
+  }
+  
+  // If library connection failed, try raw protocol with user-provided password
+  if (!connected && old_password != 0xFFFFFFFF) {
+    ESP_LOGI(TAG, "Library connection failed, trying raw protocol with provided password...");
+    connected = this->raw_verify_and_reset_password(old_password);
+    if (connected) {
+      // Raw reset succeeded - sensor is now at default password
+      connected_password = 0x00000000;
+      
+      // Recreate finger object with default password
+      if (this->finger_ != nullptr) {
+        delete this->finger_;
+      }
+      this->finger_ = new Adafruit_Fingerprint(this->hw_serial_, 0x00000000);
+      this->finger_->begin(57600);
+      delay(100);
+    }
+  }
+  
+  if (!connected) {
+    ESP_LOGW(TAG, "Cannot connect to sensor with any known password");
+    this->publish_last_action("Factory reset failed - cannot connect");
+    return false;
+  }
+  
+  // Delete all fingerprints from sensor
+  delay(50);
+  result = this->finger_->emptyDatabase();
+  if (result != FINGERPRINT_OK) {
+    ESP_LOGW(TAG, "Failed to empty fingerprint database: error %d", result);
+    // Continue anyway
+  } else {
+    ESP_LOGI(TAG, "Fingerprint database cleared");
+  }
+  
+  // Reset password to default if not already
+  if (connected_password != 0x00000000) {
+    delay(50);
+    result = this->finger_->setPassword(0x00000000);
+    if (result != FINGERPRINT_OK) {
+      ESP_LOGW(TAG, "Failed to reset sensor password: error %d", result);
+      this->publish_last_action("Factory reset failed - password reset error");
+      return false;
+    }
+    ESP_LOGI(TAG, "Sensor password reset to default");
+    
+    // Recreate finger object with default password
+    delete this->finger_;
+    this->finger_ = new Adafruit_Fingerprint(this->hw_serial_, 0x00000000);
+    this->finger_->begin(57600);
+  }
+  
+  // Update our state
+  this->sensor_password_ = 0xFFFFFFFF;
+  this->sensor_paired_ = false;
+  this->sensor_connected_ = true;
+  this->save_sensor_password();
+  
+  // Clear stored fingerprint names
+  for (uint16_t i = 1; i <= 200; i++) {
+    std::string key = "fp_" + std::to_string(i);
+    ESPPreferenceObject pref = global_preferences->make_preference<std::array<char, 32>>(fnv1_hash(key.c_str()));
+    std::array<char, 32> empty = {0};
+    pref.save(&empty);
+  }
+  this->fingerprint_names_.clear();
+  
+  ESP_LOGI(TAG, "Factory reset complete");
+  this->publish_last_action("Factory reset complete");
+  return true;
+}
+
+// Raw protocol helper for factory reset when password is unknown to library
+bool FingerprintDoorbell::raw_verify_and_reset_password(uint32_t old_password) {
+  ESP_LOGI(TAG, "Attempting raw protocol reset with password 0x%08X", old_password);
+  
+  // Clear serial buffer thoroughly
+  delay(100);
+  while (this->hw_serial_->available()) this->hw_serial_->read();
+  delay(50);
+  
+  // Build verifyPassword packet (command 0x13)
+  uint8_t p0 = (old_password >> 24) & 0xFF;
+  uint8_t p1 = (old_password >> 16) & 0xFF;
+  uint8_t p2 = (old_password >> 8) & 0xFF;
+  uint8_t p3 = old_password & 0xFF;
+  uint16_t checksum = 0x01 + 0x00 + 0x07 + 0x13 + p0 + p1 + p2 + p3;
+  
+  uint8_t verify_packet[] = {
+    0xEF, 0x01,             // Header
+    0xFF, 0xFF, 0xFF, 0xFF, // Address
+    0x01,                   // Command packet
+    0x00, 0x07,             // Length
+    0x13,                   // verifyPassword command
+    p0, p1, p2, p3,         // Password
+    (uint8_t)(checksum >> 8), (uint8_t)(checksum & 0xFF)
+  };
+  
+  this->hw_serial_->write(verify_packet, sizeof(verify_packet));
+  this->hw_serial_->flush();
+  
+  // Wait for response with timeout
+  uint32_t start = millis();
+  while (this->hw_serial_->available() < 12 && millis() - start < 500) {
+    delay(10);
+  }
+  
+  // Read response
+  uint8_t response[20];
+  int count = 0;
+  while (this->hw_serial_->available() && count < 20) {
+    response[count++] = this->hw_serial_->read();
+  }
+  
+  // Log full response for debugging
+  if (count > 0) {
+    char hex[64];
+    int pos = 0;
+    for (int i = 0; i < count && pos < 60; i++) {
+      pos += snprintf(hex + pos, 64 - pos, "%02X ", response[i]);
+    }
+    ESP_LOGD(TAG, "Raw verify response (%d bytes): %s", count, hex);
+  }
+  
+  // Check response: header EF 01, then address, then 0x07 (ack), length, confirmation code
+  if (count < 12) {
+    ESP_LOGW(TAG, "Raw verifyPassword: insufficient response (%d bytes)", count);
+    return false;
+  }
+  
+  // Verify header
+  if (response[0] != 0xEF || response[1] != 0x01) {
+    ESP_LOGW(TAG, "Raw verifyPassword: invalid header");
+    return false;
+  }
+  
+  // Byte 6 should be 0x07 (ACK packet)
+  if (response[6] != 0x07) {
+    ESP_LOGW(TAG, "Raw verifyPassword: not an ACK packet (got 0x%02X)", response[6]);
+    return false;
+  }
+  
+  // Byte 9 is confirmation code (0x00 = OK)
+  if (response[9] != 0x00) {
+    ESP_LOGW(TAG, "Raw verifyPassword failed: confirmation code 0x%02X", response[9]);
+    return false;
+  }
+  ESP_LOGI(TAG, "Raw verifyPassword OK");
+  
+  // Now send setPassword to reset to 0x00000000
+  delay(50);
+  while (this->hw_serial_->available()) this->hw_serial_->read();
+  
+  // Checksum for setPassword: 0x01 + 0x00 + 0x07 + 0x12 + 0 + 0 + 0 + 0 = 0x1A
+  uint8_t set_pass_packet[] = {
+    0xEF, 0x01,             // Header
+    0xFF, 0xFF, 0xFF, 0xFF, // Address
+    0x01,                   // Command packet
+    0x00, 0x07,             // Length
+    0x12,                   // setPassword command
+    0x00, 0x00, 0x00, 0x00, // New password (0x00000000)
+    0x00, 0x1A              // Checksum
+  };
+  
+  this->hw_serial_->write(set_pass_packet, sizeof(set_pass_packet));
+  this->hw_serial_->flush();
+  
+  // Wait for response
+  start = millis();
+  while (this->hw_serial_->available() < 12 && millis() - start < 500) {
+    delay(10);
+  }
+  
+  count = 0;
+  while (this->hw_serial_->available() && count < 20) {
+    response[count++] = this->hw_serial_->read();
+  }
+  
+  // Log response
+  if (count > 0) {
+    char hex[64];
+    int pos = 0;
+    for (int i = 0; i < count && pos < 60; i++) {
+      pos += snprintf(hex + pos, 64 - pos, "%02X ", response[i]);
+    }
+    ESP_LOGD(TAG, "Raw setPassword response (%d bytes): %s", count, hex);
+  }
+  
+  if (count >= 12 && response[0] == 0xEF && response[1] == 0x01 && 
+      response[6] == 0x07 && response[9] == 0x00) {
+    ESP_LOGI(TAG, "Raw setPassword OK - password reset to default");
+    return true;
+  }
+  
+  ESP_LOGW(TAG, "Raw setPassword failed (count=%d, code=0x%02X)", count, count >= 10 ? response[9] : 0xFF);
+  return false;
+}
+
+// Raw protocol helper to set password (more reliable than library)
+bool FingerprintDoorbell::raw_set_password(uint32_t new_password) {
+  ESP_LOGI(TAG, "Setting password via raw protocol to 0x%08X", new_password);
+  
+  // Clear serial buffer
+  delay(50);
+  while (this->hw_serial_->available()) this->hw_serial_->read();
+  
+  // Build setPassword packet (command 0x12)
+  uint8_t p0 = (new_password >> 24) & 0xFF;
+  uint8_t p1 = (new_password >> 16) & 0xFF;
+  uint8_t p2 = (new_password >> 8) & 0xFF;
+  uint8_t p3 = new_password & 0xFF;
+  uint16_t checksum = 0x01 + 0x00 + 0x07 + 0x12 + p0 + p1 + p2 + p3;
+  
+  uint8_t packet[] = {
+    0xEF, 0x01,             // Header
+    0xFF, 0xFF, 0xFF, 0xFF, // Address
+    0x01,                   // Command packet
+    0x00, 0x07,             // Length
+    0x12,                   // setPassword command
+    p0, p1, p2, p3,         // New password
+    (uint8_t)(checksum >> 8), (uint8_t)(checksum & 0xFF)
+  };
+  
+  this->hw_serial_->write(packet, sizeof(packet));
+  this->hw_serial_->flush();
+  
+  // Wait for response
+  uint32_t start = millis();
+  while (this->hw_serial_->available() < 12 && millis() - start < 500) {
+    delay(10);
+  }
+  
+  uint8_t response[20];
+  int count = 0;
+  while (this->hw_serial_->available() && count < 20) {
+    response[count++] = this->hw_serial_->read();
+  }
+  
+  // Log response
+  if (count > 0) {
+    char hex[64];
+    int pos = 0;
+    for (int i = 0; i < count && pos < 60; i++) {
+      pos += snprintf(hex + pos, 64 - pos, "%02X ", response[i]);
+    }
+    ESP_LOGD(TAG, "Raw setPassword response (%d bytes): %s", count, hex);
+  }
+  
+  if (count >= 12 && response[0] == 0xEF && response[1] == 0x01 && 
+      response[6] == 0x07 && response[9] == 0x00) {
+    ESP_LOGI(TAG, "Raw setPassword OK");
+    return true;
+  }
+  
+  ESP_LOGW(TAG, "Raw setPassword failed (count=%d, code=0x%02X)", count, count >= 10 ? response[9] : 0xFF);
+  return false;
 }
 
 // ==================== REST API ====================
@@ -1124,7 +1554,7 @@ class FingerprintRequestHandler : public AsyncWebHandler {
   
   bool canHandle(AsyncWebServerRequest *request) const override {
     std::string url = request->url();
-    return url.rfind("/fingerprint/", 0) == 0;  // starts_with equivalent
+    return url.rfind("/fingerprint/", 0) == 0 || url.rfind("/pincode/", 0) == 0;
   }
   
   bool isRequestHandlerTrivial() const override { return false; }
@@ -1223,6 +1653,29 @@ class FingerprintRequestHandler : public AsyncWebHandler {
         this->send_cors_response(request, 200, "application/json", "{\"status\":\"unpaired\"}");
       } else {
         this->send_cors_response(request, 500, "application/json", "{\"error\":\"Failed to unpair sensor\"}");
+      }
+      return;
+    }
+    
+    // POST /fingerprint/factory_reset?password=XXXXXXXX - Factory reset sensor (delete all fingerprints and reset password)
+    // Password is optional - if provided, will try to connect with it first
+    if (url == "/fingerprint/factory_reset" && request->method() == HTTP_POST) {
+      uint32_t old_password = 0xFFFFFFFF;  // Default: no password provided
+      
+      if (request->hasParam("password")) {
+        std::string password_str = request->getParam("password")->value();
+        char *endptr;
+        old_password = strtoul(password_str.c_str(), &endptr, 16);
+        if (*endptr != '\0' || password_str.empty()) {
+          this->send_cors_response(request, 400, "application/json", "{\"error\":\"Invalid password format (use hex, e.g. 12345678)\"}");
+          return;
+        }
+      }
+      
+      if (this->parent_->factory_reset_sensor(old_password)) {
+        this->send_cors_response(request, 200, "application/json", "{\"status\":\"factory_reset_complete\"}");
+      } else {
+        this->send_cors_response(request, 500, "application/json", "{\"error\":\"Factory reset failed - check password or sensor connection\"}");
       }
       return;
     }
@@ -1391,6 +1844,152 @@ class FingerprintRequestHandler : public AsyncWebHandler {
       return;
     }
     
+    // ==================== PIN CODE ENDPOINTS ====================
+    
+    // GET /pincode/list - List all PIN codes (without revealing the actual codes)
+    if (url == "/pincode/list" && request->method() == HTTP_GET) {
+      this->send_cors_response(request, 200, "application/json", this->parent_->get_pin_code_list_json());
+      return;
+    }
+    
+    // GET /pincode/status - Get keypad status
+    if (url == "/pincode/status" && request->method() == HTTP_GET) {
+      std::string json = "{\"enabled\":" + std::string(this->parent_->is_keypad_enabled() ? "true" : "false");
+      json += ",\"count\":" + std::to_string(this->parent_->get_pin_code_count()) + "}";
+      this->send_cors_response(request, 200, "application/json", json);
+      return;
+    }
+    
+    // POST /pincode/add?id=X&code=XXXX&name=Y - Add a new PIN code
+    if (url == "/pincode/add" && request->method() == HTTP_POST) {
+      if (!request->hasParam("id") || !request->hasParam("code") || !request->hasParam("name")) {
+        this->send_cors_response(request, 400, "application/json", "{\"error\":\"Missing id, code, or name parameter\"}");
+        return;
+      }
+      std::string id_str = request->getParam("id")->value();
+      std::string code = request->getParam("code")->value();
+      std::string name = request->getParam("name")->value();
+      uint16_t id = std::atoi(id_str.c_str());
+      
+      if (id < 1 || id > 100) {
+        this->send_cors_response(request, 400, "application/json", "{\"error\":\"ID must be 1-100\"}");
+        return;
+      }
+      if (code.length() < 4 || code.length() > 10) {
+        this->send_cors_response(request, 400, "application/json", "{\"error\":\"Code must be 4-10 digits\"}");
+        return;
+      }
+      for (char c : code) {
+        if (c < '0' || c > '9') {
+          this->send_cors_response(request, 400, "application/json", "{\"error\":\"Code must contain only digits 0-9\"}");
+          return;
+        }
+      }
+      
+      if (this->parent_->add_pin_code(id, code, name)) {
+        std::string response = "{\"status\":\"added\",\"id\":" + std::to_string(id) + ",\"name\":\"" + name + "\"}";
+        this->send_cors_response(request, 200, "application/json", response);
+      } else {
+        this->send_cors_response(request, 500, "application/json", "{\"error\":\"Failed to add PIN code (ID may already exist)\"}");
+      }
+      return;
+    }
+    
+    // POST /pincode/delete?id=X - Delete a PIN code
+    if (url == "/pincode/delete" && request->method() == HTTP_POST) {
+      if (!request->hasParam("id")) {
+        this->send_cors_response(request, 400, "application/json", "{\"error\":\"Missing id parameter\"}");
+        return;
+      }
+      std::string id_str = request->getParam("id")->value();
+      uint16_t id = std::atoi(id_str.c_str());
+      
+      if (this->parent_->delete_pin_code(id)) {
+        std::string response = "{\"status\":\"deleted\",\"id\":" + std::to_string(id) + "}";
+        this->send_cors_response(request, 200, "application/json", response);
+      } else {
+        this->send_cors_response(request, 500, "application/json", "{\"error\":\"Delete failed\"}");
+      }
+      return;
+    }
+    
+    // POST /pincode/delete_all - Delete all PIN codes
+    if (url == "/pincode/delete_all" && request->method() == HTTP_POST) {
+      if (this->parent_->delete_all_pin_codes()) {
+        this->send_cors_response(request, 200, "application/json", "{\"status\":\"all_deleted\"}");
+      } else {
+        this->send_cors_response(request, 500, "application/json", "{\"error\":\"Delete all failed\"}");
+      }
+      return;
+    }
+    
+    // POST /pincode/rename?id=X&name=Y - Rename a PIN code
+    if (url == "/pincode/rename" && request->method() == HTTP_POST) {
+      if (!request->hasParam("id") || !request->hasParam("name")) {
+        this->send_cors_response(request, 400, "application/json", "{\"error\":\"Missing id or name parameter\"}");
+        return;
+      }
+      std::string id_str = request->getParam("id")->value();
+      std::string name = request->getParam("name")->value();
+      uint16_t id = std::atoi(id_str.c_str());
+      
+      if (this->parent_->rename_pin_code(id, name)) {
+        std::string response = "{\"status\":\"renamed\",\"id\":" + std::to_string(id) + ",\"name\":\"" + name + "\"}";
+        this->send_cors_response(request, 200, "application/json", response);
+      } else {
+        this->send_cors_response(request, 500, "application/json", "{\"error\":\"Rename failed\"}");
+      }
+      return;
+    }
+    
+    // POST /pincode/update?id=X&code=XXXX - Update PIN code value
+    if (url == "/pincode/update" && request->method() == HTTP_POST) {
+      if (!request->hasParam("id") || !request->hasParam("code")) {
+        this->send_cors_response(request, 400, "application/json", "{\"error\":\"Missing id or code parameter\"}");
+        return;
+      }
+      std::string id_str = request->getParam("id")->value();
+      std::string code = request->getParam("code")->value();
+      uint16_t id = std::atoi(id_str.c_str());
+      
+      if (code.length() < 4 || code.length() > 10) {
+        this->send_cors_response(request, 400, "application/json", "{\"error\":\"Code must be 4-10 digits\"}");
+        return;
+      }
+      for (char c : code) {
+        if (c < '0' || c > '9') {
+          this->send_cors_response(request, 400, "application/json", "{\"error\":\"Code must contain only digits 0-9\"}");
+          return;
+        }
+      }
+      
+      if (this->parent_->update_pin_code(id, code)) {
+        std::string response = "{\"status\":\"updated\",\"id\":" + std::to_string(id) + "}";
+        this->send_cors_response(request, 200, "application/json", response);
+      } else {
+        this->send_cors_response(request, 500, "application/json", "{\"error\":\"Update failed\"}");
+      }
+      return;
+    }
+    
+    // GET /pincode/export?id=X - Export a PIN code (id, name, code)
+    if (url == "/pincode/export" && request->method() == HTTP_GET) {
+      if (!request->hasParam("id")) {
+        this->send_cors_response(request, 400, "application/json", "{\"error\":\"Missing id parameter\"}");
+        return;
+      }
+      std::string id_str = request->getParam("id")->value();
+      uint16_t id = std::atoi(id_str.c_str());
+      
+      std::string json = this->parent_->export_pin_code_json(id);
+      if (!json.empty()) {
+        this->send_cors_response(request, 200, "application/json", json);
+      } else {
+        this->send_cors_response(request, 404, "application/json", "{\"error\":\"PIN code not found\"}");
+      }
+      return;
+    }
+    
     this->send_cors_response(request, 404, "application/json", "{\"error\":\"Unknown endpoint\"}");
   }
   
@@ -1476,7 +2075,434 @@ void FingerprintDoorbell::setup_web_server() {
   
   base->init();
   base->add_handler(new FingerprintRequestHandler(this));
-  ESP_LOGI(TAG, "REST API registered at /fingerprint/*");
+  ESP_LOGI(TAG, "REST API registered at /fingerprint/* and /pincode/*");
+}
+
+// ==================== KEYPAD FUNCTIONS ====================
+
+void FingerprintDoorbell::setup_keypad() {
+  ESP_LOGD(TAG, "Setting up keypad with %d rows and %d cols", 
+           this->keypad_row_pins_.size(), this->keypad_col_pins_.size());
+  
+  // Configure all pins as INPUT_PULLUP initially
+  // Row pins will be switched to OUTPUT/LOW during scanning
+  for (auto *pin : this->keypad_row_pins_) {
+    pin->setup();
+    pin->pin_mode(gpio::FLAG_INPUT | gpio::FLAG_PULLUP);
+  }
+  
+  // Configure column pins as INPUT with PULLUP
+  for (auto *pin : this->keypad_col_pins_) {
+    pin->setup();
+    pin->pin_mode(gpio::FLAG_INPUT | gpio::FLAG_PULLUP);
+  }
+  
+  this->keypad_buffer_.clear();
+  this->keypad_last_key_time_ = 0;
+  this->keypad_last_key_ = 0;
+  this->keypad_last_scan_time_ = 0;
+}
+
+void FingerprintDoorbell::scan_keypad() {
+  // Throttle scanning to every 20ms
+  uint32_t now = millis();
+  if (now - this->keypad_last_scan_time_ < 20) {
+    return;
+  }
+  this->keypad_last_scan_time_ = now;
+  
+  // Clear buffer and reset LED if no input for 4 seconds
+  if (this->keypad_buffer_.length() > 0 && 
+      now - this->keypad_last_key_time_ > 4000) {
+    ESP_LOGD(TAG, "Keypad buffer timeout, clearing");
+    this->keypad_buffer_.clear();
+    if (this->keypad_input_active_) {
+      this->keypad_input_active_ = false;
+      this->set_led_ring_ready();
+    }
+  }
+  
+  char key = this->get_pressed_key();
+  
+  // Debounce: only process if key changed and debounce period passed
+  if (key != this->keypad_last_key_) {
+    // Key released or new key pressed
+    if (key != 0 && (now - this->keypad_last_key_time_ > 150)) {
+      // New key pressed after debounce
+      this->process_keypad_input(key);
+      this->keypad_last_key_time_ = now;
+    }
+    this->keypad_last_key_ = key;
+  }
+}
+
+char FingerprintDoorbell::get_pressed_key() {
+  // Standard 4x3 matrix keypad layout
+  // Rows drive LOW, columns read with internal pullup
+  // Layout:
+  //        COL1  COL2  COL3
+  // ROW1:   1     2     3
+  // ROW2:   4     5     6
+  // ROW3:   7     8     9
+  // ROW4:   *     0     #
+  static const char keys[4][3] = {
+    {'1', '2', '3'},
+    {'4', '5', '6'},
+    {'7', '8', '9'},
+    {'*', '0', '#'}
+  };
+  
+  // Ensure column pins are INPUT_PULLUP before each scan
+  for (auto *pin : this->keypad_col_pins_) {
+    pin->pin_mode(gpio::FLAG_INPUT | gpio::FLAG_PULLUP);
+  }
+  delayMicroseconds(10);
+  
+  // Scan each row
+  for (size_t row = 0; row < this->keypad_row_pins_.size() && row < 4; row++) {
+    // Set current row to OUTPUT LOW
+    this->keypad_row_pins_[row]->pin_mode(gpio::FLAG_OUTPUT);
+    this->keypad_row_pins_[row]->digital_write(false);
+    delayMicroseconds(50);
+    
+    for (size_t col = 0; col < this->keypad_col_pins_.size() && col < 3; col++) {
+      bool col_state = this->keypad_col_pins_[col]->digital_read();
+      if (!col_state) {
+        // Key pressed - reset row and return
+        this->keypad_row_pins_[row]->digital_write(true);
+        this->keypad_row_pins_[row]->pin_mode(gpio::FLAG_INPUT | gpio::FLAG_PULLUP);
+        ESP_LOGD(TAG, "Keypad: row=%d col=%d -> key='%c'", row, col, keys[row][col]);
+        return keys[row][col];
+      }
+    }
+    
+    // Reset row to INPUT (high-impedance)
+    this->keypad_row_pins_[row]->digital_write(true);
+    this->keypad_row_pins_[row]->pin_mode(gpio::FLAG_INPUT | gpio::FLAG_PULLUP);
+  }
+  
+  return 0;  // No key pressed
+}
+
+void FingerprintDoorbell::process_keypad_input(char key) {
+  ESP_LOGD(TAG, "Keypad key pressed: %c", key);
+  
+  if (key == '*') {
+    // Confirm/submit PIN
+    if (this->keypad_buffer_.length() >= 4) {
+      this->verify_pin_code();
+    } else if (this->keypad_buffer_.length() > 0) {
+      ESP_LOGD(TAG, "PIN too short (min 4 digits)");
+      // Publish invalid attempt for too short PIN
+      if (this->pin_invalid_sensor_ != nullptr) {
+        this->pin_invalid_sensor_->publish_state(true);
+        this->set_timeout(500, [this]() {
+          this->pin_invalid_sensor_->publish_state(false);
+        });
+      }
+      this->publish_last_action("PIN too short");
+      // Show error LED for 1 second
+      this->set_led_ring_no_match();
+      this->last_ring_time_ = millis();
+    }
+    this->keypad_buffer_.clear();
+    this->keypad_input_active_ = false;
+  } else if (key == '#') {
+    // Lock action
+    this->trigger_lock_action();
+    this->keypad_buffer_.clear();
+    this->keypad_input_active_ = false;
+    this->set_led_ring_ready();
+  } else if (key >= '0' && key <= '9') {
+    // Digit - add to buffer (max 10 digits)
+    if (this->keypad_buffer_.length() < 10) {
+      // First digit - set LED to scanning (blue flashing)
+      if (this->keypad_buffer_.empty() && !this->keypad_input_active_) {
+        this->keypad_input_active_ = true;
+        this->set_led_ring_scanning();
+      }
+      this->keypad_buffer_ += key;
+      ESP_LOGD(TAG, "Keypad buffer: %d digits", this->keypad_buffer_.length());
+    }
+  }
+}
+
+void FingerprintDoorbell::verify_pin_code() {
+  ESP_LOGI(TAG, "Verifying PIN code (%d digits)", this->keypad_buffer_.length());
+  
+  // Reset input active state
+  this->keypad_input_active_ = false;
+  
+  // Search for matching PIN code
+  for (const auto &pair : this->pin_codes_) {
+    if (pair.second.code == this->keypad_buffer_) {
+      // Match found!
+      ESP_LOGI(TAG, "PIN match: ID=%d, Name=%s", pair.first, pair.second.name.c_str());
+      
+      // Publish match to PIN-specific sensor only (not fingerprint match sensor)
+      if (this->pin_match_name_sensor_ != nullptr) {
+        this->pin_match_name_sensor_->publish_state(pair.second.name);
+        // Reset PIN match name after 3 seconds
+        this->set_timeout(3000, [this]() {
+          if (this->pin_match_name_sensor_ != nullptr) {
+            this->pin_match_name_sensor_->publish_state("");
+          }
+        });
+      }
+      
+      this->publish_last_action("PIN unlock: " + pair.second.name);
+      
+      // Trigger unlock action (255 = PIN code, always unlock)
+      this->trigger_unlock_action(255);
+      
+      // Set LED to match state (pink) - will reset after 1 second via loop()
+      this->set_led_ring_match();
+      this->last_match_time_ = millis();
+      
+      return;
+    }
+  }
+  
+  // No match - invalid PIN
+  ESP_LOGW(TAG, "Invalid PIN code entered");
+  
+  if (this->pin_invalid_sensor_ != nullptr) {
+    this->pin_invalid_sensor_->publish_state(true);
+    this->set_timeout(500, [this]() {
+      this->pin_invalid_sensor_->publish_state(false);
+    });
+  }
+  
+  this->publish_last_action("Invalid PIN");
+  
+  // Set LED to no-match state (red) - will reset after 1 second via loop()
+  this->set_led_ring_no_match();
+  this->last_ring_time_ = millis();
+}
+
+void FingerprintDoorbell::trigger_lock_action() {
+  ESP_LOGI(TAG, "Lock action triggered via keypad");
+  
+  if (this->lock_action_sensor_ != nullptr) {
+    this->lock_action_sensor_->publish_state(true);
+    this->set_timeout(500, [this]() {
+      this->lock_action_sensor_->publish_state(false);
+    });
+  }
+  
+  this->publish_last_action("Lock triggered");
+}
+
+void FingerprintDoorbell::trigger_unlock_action(uint16_t confidence) {
+  // Check confidence threshold (255 means PIN code, always unlock)
+  if (confidence < this->min_unlock_confidence_ && confidence != 255) {
+    ESP_LOGW(TAG, "Unlock action skipped: confidence %d < min %d", confidence, this->min_unlock_confidence_);
+    return;
+  }
+  
+  ESP_LOGI(TAG, "Unlock action triggered (confidence: %d)", confidence);
+  
+  if (this->unlock_action_sensor_ != nullptr) {
+    this->unlock_action_sensor_->publish_state(true);
+    this->set_timeout(1000, [this]() {
+      this->unlock_action_sensor_->publish_state(false);
+    });
+  }
+}
+
+// ==================== PIN CODE STORAGE ====================
+
+void FingerprintDoorbell::load_pin_codes() {
+  this->pin_codes_.clear();
+  
+  for (uint16_t i = 1; i <= 100; i++) {
+    // Load code
+    std::string code_key = "pin_code_" + std::to_string(i);
+    ESPPreferenceObject code_pref = global_preferences->make_preference<std::array<char, 16>>(fnv1_hash(code_key.c_str()));
+    
+    std::array<char, 16> code_array;
+    if (code_pref.load(&code_array)) {
+      std::string code(code_array.data());
+      if (!code.empty() && code[0] != '\0') {
+        // Load name
+        std::string name_key = "pin_name_" + std::to_string(i);
+        ESPPreferenceObject name_pref = global_preferences->make_preference<std::array<char, 32>>(fnv1_hash(name_key.c_str()));
+        
+        std::array<char, 32> name_array;
+        std::string name = "Unknown";
+        if (name_pref.load(&name_array)) {
+          name = std::string(name_array.data());
+        }
+        
+        PinCode pc;
+        pc.id = i;
+        pc.code = code;
+        pc.name = name;
+        this->pin_codes_[i] = pc;
+      }
+    }
+  }
+  
+  ESP_LOGI(TAG, "%d PIN codes loaded", this->pin_codes_.size());
+}
+
+void FingerprintDoorbell::save_pin_code(uint16_t id, const std::string &code, const std::string &name) {
+  // Save code
+  std::string code_key = "pin_code_" + std::to_string(id);
+  ESPPreferenceObject code_pref = global_preferences->make_preference<std::array<char, 16>>(fnv1_hash(code_key.c_str()));
+  
+  std::array<char, 16> code_array = {};
+  strncpy(code_array.data(), code.c_str(), 15);
+  code_array[15] = '\0';
+  code_pref.save(&code_array);
+  
+  // Save name
+  std::string name_key = "pin_name_" + std::to_string(id);
+  ESPPreferenceObject name_pref = global_preferences->make_preference<std::array<char, 32>>(fnv1_hash(name_key.c_str()));
+  
+  std::array<char, 32> name_array = {};
+  strncpy(name_array.data(), name.c_str(), 31);
+  name_array[31] = '\0';
+  name_pref.save(&name_array);
+  
+  // Update in-memory map
+  PinCode pc;
+  pc.id = id;
+  pc.code = code;
+  pc.name = name;
+  this->pin_codes_[id] = pc;
+}
+
+void FingerprintDoorbell::delete_pin_code_storage(uint16_t id) {
+  // Clear code
+  std::string code_key = "pin_code_" + std::to_string(id);
+  ESPPreferenceObject code_pref = global_preferences->make_preference<std::array<char, 16>>(fnv1_hash(code_key.c_str()));
+  
+  std::array<char, 16> empty_code = {};
+  code_pref.save(&empty_code);
+  
+  // Clear name
+  std::string name_key = "pin_name_" + std::to_string(id);
+  ESPPreferenceObject name_pref = global_preferences->make_preference<std::array<char, 32>>(fnv1_hash(name_key.c_str()));
+  
+  std::array<char, 32> empty_name = {};
+  name_pref.save(&empty_name);
+  
+  // Remove from in-memory map
+  this->pin_codes_.erase(id);
+}
+
+// ==================== PIN CODE MANAGEMENT (PUBLIC) ====================
+
+bool FingerprintDoorbell::add_pin_code(uint16_t id, const std::string &code, const std::string &name) {
+  // Check if ID already exists
+  if (this->pin_codes_.find(id) != this->pin_codes_.end()) {
+    ESP_LOGW(TAG, "PIN code ID %d already exists", id);
+    return false;
+  }
+  
+  // Check if code already exists (prevent duplicate codes)
+  for (const auto &pair : this->pin_codes_) {
+    if (pair.second.code == code) {
+      ESP_LOGW(TAG, "PIN code already in use by ID %d", pair.first);
+      return false;
+    }
+  }
+  
+  this->save_pin_code(id, code, name);
+  ESP_LOGI(TAG, "Added PIN code: ID=%d, Name=%s", id, name.c_str());
+  this->publish_last_action("PIN added: " + name);
+  return true;
+}
+
+bool FingerprintDoorbell::delete_pin_code(uint16_t id) {
+  if (this->pin_codes_.find(id) == this->pin_codes_.end()) {
+    ESP_LOGW(TAG, "PIN code ID %d not found", id);
+    return false;
+  }
+  
+  std::string name = this->pin_codes_[id].name;
+  this->delete_pin_code_storage(id);
+  ESP_LOGI(TAG, "Deleted PIN code: ID=%d", id);
+  this->publish_last_action("PIN deleted: " + name);
+  return true;
+}
+
+bool FingerprintDoorbell::delete_all_pin_codes() {
+  for (auto &pair : this->pin_codes_) {
+    this->delete_pin_code_storage(pair.first);
+  }
+  this->pin_codes_.clear();
+  ESP_LOGI(TAG, "All PIN codes deleted");
+  this->publish_last_action("All PINs deleted");
+  return true;
+}
+
+bool FingerprintDoorbell::rename_pin_code(uint16_t id, const std::string &new_name) {
+  if (this->pin_codes_.find(id) == this->pin_codes_.end()) {
+    ESP_LOGW(TAG, "PIN code ID %d not found", id);
+    return false;
+  }
+  
+  std::string code = this->pin_codes_[id].code;
+  this->save_pin_code(id, code, new_name);
+  ESP_LOGI(TAG, "Renamed PIN code: ID=%d to %s", id, new_name.c_str());
+  this->publish_last_action("PIN renamed: " + new_name);
+  return true;
+}
+
+bool FingerprintDoorbell::update_pin_code(uint16_t id, const std::string &new_code) {
+  if (this->pin_codes_.find(id) == this->pin_codes_.end()) {
+    ESP_LOGW(TAG, "PIN code ID %d not found", id);
+    return false;
+  }
+  
+  // Check if new code already exists
+  for (const auto &pair : this->pin_codes_) {
+    if (pair.first != id && pair.second.code == new_code) {
+      ESP_LOGW(TAG, "PIN code already in use by ID %d", pair.first);
+      return false;
+    }
+  }
+  
+  std::string name = this->pin_codes_[id].name;
+  this->save_pin_code(id, new_code, name);
+  ESP_LOGI(TAG, "Updated PIN code: ID=%d", id);
+  this->publish_last_action("PIN updated: " + name);
+  return true;
+}
+
+std::string FingerprintDoorbell::get_pin_code_list_json() {
+  std::string json = "[";
+  bool first = true;
+  
+  for (const auto &pair : this->pin_codes_) {
+    if (!first) json += ",";
+    first = false;
+    // Note: We don't return the actual code for security
+    json += "{\"id\":" + std::to_string(pair.first);
+    json += ",\"name\":\"" + pair.second.name + "\"}";
+  }
+  
+  json += "]";
+  return json;
+}
+
+std::string FingerprintDoorbell::export_pin_code_json(uint16_t id) {
+  auto it = this->pin_codes_.find(id);
+  if (it == this->pin_codes_.end()) {
+    return "";  // Not found
+  }
+  
+  // Return full PIN code data for export (including the code)
+  std::string json = "{\"id\":" + std::to_string(id);
+  json += ",\"name\":\"" + it->second.name + "\"";
+  json += ",\"code\":\"" + it->second.code + "\"}";
+  return json;
+}
+
+uint16_t FingerprintDoorbell::get_pin_code_count() {
+  return this->pin_codes_.size();
 }
 
 }  // namespace fingerprint_doorbell

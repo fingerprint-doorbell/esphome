@@ -12,8 +12,8 @@
 external_components:
   - source:
       type: git
-      url: https://github.com/claudio-walser/esphome-fingerprint-doorbell
-      ref: v1.1.5
+      url: https://github.com/fingerprint-doorbell/esphome
+      ref: v1.1.6
     components: [ fingerprint_doorbell ]
     refresh: 0s
 esphome:
@@ -38,6 +38,19 @@ fingerprint_doorbell:
   doorbell_pin: GPIO19 # Output when no match (doorbell event)
   ignore_touch_ring: false
   api_token: ${api_encryption_key}  # Protects REST API endpoints
+
+  # Matrix Keypad 4x3 configuration
+  # Standard matrix: rows drive LOW, columns read with pullup
+  # * = confirm PIN, # = lock action
+  keypad_row_pins:
+    - GPIO25  # ROW1 (1,2,3) - Green wire - PAD 2
+    - GPIO18  # ROW2 (4,5,6) - Red wire - PAD 7
+    - GPIO26  # ROW3 (7,8,9) - Orange wire - PAD 6
+    - GPIO22  # ROW4 (*,0,#) - Purple wire - PAD 4
+  keypad_col_pins:
+    - GPIO32  # COL1 (1,4,7,*) - Blue wire - PAD 3
+    - GPIO27  # COL2 (2,5,8,0) - Yellow wire - PAD 1
+    - GPIO21  # COL3 (3,6,9,#) - White wire - PAD 5
 
   # LED configuration (colors: red, blue, purple)
   # LED modes: breathing, flashing, on, off, gradual_on, gradual_off
@@ -73,6 +86,11 @@ fingerprint_doorbell:
   led_enroll_mode: flashing
   led_enroll_speed: 25
 
+  # Unlock action minimum confidence (0-255, default 80)
+  # Fingerprint must have at least this confidence to trigger unlock
+  # PIN codes always trigger unlock regardless of this setting
+  min_unlock_confidence: 80
+
 
 # Sensors
 sensor:
@@ -97,6 +115,9 @@ text_sensor:
     last_action:
       name: "Last Action"
       id: fp_last_action
+    pin_match_name:
+      name: "PIN Match Name"
+      id: fp_pin_match_name
 
 binary_sensor:
   - platform: fingerprint_doorbell
@@ -107,3 +128,12 @@ binary_sensor:
     finger:
       name: "Finger Detected"
       id: fp_finger
+    pin_invalid:
+      name: "PIN Invalid"
+      id: fp_pin_invalid
+    lock_action:
+      name: "Lock Action"
+      id: fp_lock_action
+    unlock_action:
+      name: "Unlock Action"
+      id: fp_unlock_action

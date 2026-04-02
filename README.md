@@ -587,11 +587,111 @@ Same license as the original FingerprintDoorbell project.
 
 | Matrix-Pad | Function | ESP32-GPIO | Cable Color |
 |------------|----------|------------|-------------|
-| PAD 4      | ROW1     | IO32       | Blue        |
-| PAD 2      | ROW2     | IO27       | Yellow      |
-| PAD 6      | ROW3     | IO00       | White       |
-| PAD 5      | ROW4     | IO04       | Purple      |
-| PAD 3      | COL1     | IO25       | Green       |
-| PAD 8      | COL2     | IO22       | Red         |
-| PAD 7      | COL3     | IO02       | Orange      |    
+| PAD 1      | ROW2     | IO27       | Yellow      |
+| PAD 2      | COL1     | IO25       | Green       |
+| PAD 3      | ROW1     | IO32       | Blue        |
+| PAD 4      | ROW4     | IO22       | Purple      |
+| PAD 5      | COL3     | IO21       | White       |
+| PAD 6      | ROW3     | IO17       | Orange      |
+| PAD 7      | COL2     | IO16       | Red         |
+
+27, 25, 32, 22, 21, 17, 16
+
+### Keypad Layout
+```
+  COL1  COL2  COL3
+   |     |     |
+ROW1--[1]--[2]--[3]
+ROW2--[4]--[5]--[6]
+ROW3--[7]--[8]--[9]
+ROW4--[*]--[0]--[#]
+```
+
+| Key | Function |
+|-----|----------|
+| `0-9` | Enter PIN digits (4-10 digits) |
+| `*` | Confirm/submit PIN → unlock |
+| `#` | Trigger lock action |
+
+---
+
+## 🔐 PIN Code Management
+
+### PIN Code Sensors
+
+| Sensor | Description |
+|--------|-------------|
+| `pin_match_name` | Name of successfully matched PIN |
+| `pin_invalid` | Pulses `on` for 500ms on invalid PIN attempt |
+| `lock_action` | Pulses `on` for 500ms when `#` is pressed |
+
+**Note:** On successful PIN match, `match_name` sensor also shows `"PIN: <name>"` for unified automation handling.
+
+### PIN Code REST API
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/pincode/list` | List all PIN codes (codes hidden) |
+| GET | `/pincode/status` | Keypad status (enabled, count) |
+| POST | `/pincode/add?id=X&code=1234&name=Y` | Add PIN (4-10 digits) |
+| POST | `/pincode/delete?id=X` | Delete PIN |
+| POST | `/pincode/delete_all` | Delete all PINs |
+| POST | `/pincode/rename?id=X&name=Y` | Rename PIN |
+| POST | `/pincode/update?id=X&code=5678` | Change PIN code |
+
+**Example - Add PIN:**
+```bash
+curl -H "Authorization: Bearer your-token" \
+  -X POST "http://192.168.1.100/pincode/add?id=1&code=1234&name=John"
+```
+
+### Home Assistant Automations for PIN
+
+**Unlock on valid PIN:**
+```yaml
+automation:
+  - alias: "PIN Code Unlock"
+    trigger:
+      - platform: state
+        entity_id: text_sensor.pin_match_name
+    condition:
+      - condition: template
+        value_template: "{{ trigger.to_state.state != '' }}"
+    action:
+      - service: lock.unlock
+        target:
+          entity_id: lock.front_door
+      - service: notify.mobile_app
+        data:
+          message: "Door unlocked by PIN: {{ trigger.to_state.state }}"
+```
+
+**Lock on # key press:**
+```yaml
+automation:
+  - alias: "Lock Door via Keypad"
+    trigger:
+      - platform: state
+        entity_id: binary_sensor.lock_action
+        to: "on"
+    action:
+      - service: lock.lock
+        target:
+          entity_id: lock.front_door
+```
+
+**Alert on invalid PIN:**
+```yaml
+automation:
+  - alias: "Invalid PIN Alert"
+    trigger:
+      - platform: state
+        entity_id: binary_sensor.pin_invalid
+        to: "on"
+    action:
+      - service: notify.mobile_app
+        data:
+          message: "Invalid PIN attempt at front door!"
+          title: "Security Alert"
+```    
 
