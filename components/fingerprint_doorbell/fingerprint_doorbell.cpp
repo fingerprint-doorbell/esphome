@@ -2208,6 +2208,12 @@ void FingerprintDoorbell::process_keypad_input(char key) {
         });
       }
       this->publish_last_action("PIN too short");
+      if (this->invalid_action_sensor_ != nullptr) {
+        this->invalid_action_sensor_->publish_state("PIN");
+        this->set_timeout(3000, [this]() {
+          this->invalid_action_sensor_->publish_state("");
+        });
+      }
       // Show error LED for 1 second
       this->set_led_ring_no_match();
       this->last_ring_time_ = millis();
