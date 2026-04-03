@@ -118,6 +118,9 @@ text_sensor:
     pin_match_name:
       name: "PIN Match Name"
       id: fp_pin_match_name
+    invalid_action:
+      name: "Invalid Action"
+      id: fp_invalid_action
 
 binary_sensor:
   - platform: fingerprint_doorbell

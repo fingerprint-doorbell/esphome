@@ -87,6 +87,7 @@ class FingerprintDoorbell : public Component {
   void set_enroll_status_sensor(text_sensor::TextSensor *sensor) { enroll_status_sensor_ = sensor; }
   void set_last_action_sensor(text_sensor::TextSensor *sensor) { last_action_sensor_ = sensor; }
   void set_pin_match_name_sensor(text_sensor::TextSensor *sensor) { pin_match_name_sensor_ = sensor; }
+  void set_invalid_action_sensor(text_sensor::TextSensor *sensor) { invalid_action_sensor_ = sensor; }
   void set_pin_invalid_sensor(binary_sensor::BinarySensor *sensor) { pin_invalid_sensor_ = sensor; }
   void set_lock_action_sensor(binary_sensor::BinarySensor *sensor) { lock_action_sensor_ = sensor; }
   void set_unlock_action_sensor(binary_sensor::BinarySensor *sensor) { unlock_action_sensor_ = sensor; }
@@ -154,6 +155,7 @@ class FingerprintDoorbell : public Component {
   text_sensor::TextSensor *enroll_status_sensor_{nullptr};
   text_sensor::TextSensor *last_action_sensor_{nullptr};
   text_sensor::TextSensor *pin_match_name_sensor_{nullptr};
+  text_sensor::TextSensor *invalid_action_sensor_{nullptr};
   binary_sensor::BinarySensor *pin_invalid_sensor_{nullptr};
   binary_sensor::BinarySensor *lock_action_sensor_{nullptr};
   binary_sensor::BinarySensor *unlock_action_sensor_{nullptr};

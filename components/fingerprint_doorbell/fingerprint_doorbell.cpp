@@ -140,6 +140,13 @@ void FingerprintDoorbell::loop() {
     this->publish_last_action("Doorbell ring");
     this->last_ring_time_ = millis();
     
+    if (this->invalid_action_sensor_ != nullptr) {
+      this->invalid_action_sensor_->publish_state("FINGERPRINT");
+      this->set_timeout(3000, [this]() {
+        this->invalid_action_sensor_->publish_state("");
+      });
+    }
+    
     // Clear doorbell output after 1 second
     this->set_timeout(1000, [this]() {
       if (this->ring_sensor_ != nullptr)
@@ -2274,6 +2281,13 @@ void FingerprintDoorbell::verify_pin_code() {
   }
   
   this->publish_last_action("Invalid PIN");
+  
+  if (this->invalid_action_sensor_ != nullptr) {
+    this->invalid_action_sensor_->publish_state("PIN");
+    this->set_timeout(3000, [this]() {
+      this->invalid_action_sensor_->publish_state("");
+    });
+  }
   
   // Set LED to no-match state (red) - will reset after 1 second via loop()
   this->set_led_ring_no_match();
