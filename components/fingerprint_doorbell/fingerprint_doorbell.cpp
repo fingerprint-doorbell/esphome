@@ -2317,6 +2317,14 @@ void FingerprintDoorbell::trigger_unlock_action(uint16_t confidence) {
   // Check confidence threshold (255 means PIN code, always unlock)
   if (confidence < this->min_unlock_confidence_ && confidence != 255) {
     ESP_LOGW(TAG, "Unlock action skipped: confidence %d < min %d", confidence, this->min_unlock_confidence_);
+    this->set_led_ring_no_match();
+    this->last_ring_time_ = millis();
+    if (this->invalid_action_sensor_ != nullptr) {
+      this->invalid_action_sensor_->publish_state("FINGERPRINT");
+      this->set_timeout(3000, [this]() {
+        this->invalid_action_sensor_->publish_state("");
+      });
+    }
     return;
   }
   
