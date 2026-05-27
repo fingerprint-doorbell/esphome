@@ -413,6 +413,9 @@ void FingerprintDoorbell::start_enrollment(uint16_t id, const std::string &name)
   this->enroll_sample_ = 1;
   this->enroll_timeout_ = millis() + 60000;  // 60 second timeout
   
+  // Pre-write name to preferences so stale names from previous attempts are overwritten
+  this->save_fingerprint_name(id, name);
+  
   this->set_led_ring_enroll();
   this->publish_enroll_status("Place finger (1/5)");
   this->publish_last_action("Enrollment started for ID " + std::to_string(id));
@@ -542,6 +545,7 @@ void FingerprintDoorbell::process_enrollment() {
         ESP_LOGI(TAG, "Enrollment complete, finger removed");
         this->mode_ = Mode::SCAN;
         this->enroll_step_ = EnrollStep::IDLE;
+        this->last_match_time_ = millis();  // Prevent immediate scan after enrollment
         this->set_led_ring_ready();
         this->publish_enroll_status("Complete");
       }
