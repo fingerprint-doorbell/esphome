@@ -504,14 +504,13 @@ void FingerprintDoorbell::process_enrollment() {
               this->publish_enroll_status("Place finger (" + std::to_string(global_next) + "/6)");
             }
           } else if (result == FINGERPRINT_ENROLLMISMATCH) {
-            ESP_LOGW(TAG, "Round %d: fingerprints did not match", this->enroll_round_);
-            this->mode_ = Mode::SCAN;
-            this->enroll_step_ = EnrollStep::IDLE;
-            this->enroll_round_ = 1;
+            ESP_LOGW(TAG, "Round %d: fingerprints did not match, retrying round", this->enroll_round_);
+            this->enroll_sample_ = 1;
+            this->enroll_step_ = EnrollStep::WAITING_FOR_FINGER;
             this->set_led_ring_error();
-            this->publish_enroll_status("Error: prints don't match");
-            this->publish_last_action("Enrollment failed: mismatch");
-            this->set_timeout(2000, [this]() { this->set_led_ring_ready(); });
+            uint8_t global_scan = (this->enroll_round_ - 1) * 2 + 1;
+            this->publish_enroll_status("No match, try again (" + std::to_string(global_scan) + "/6)");
+            this->set_timeout(1000, [this]() { this->set_led_ring_enroll(); });
           } else {
             ESP_LOGW(TAG, "Error creating model: %d", result);
             this->mode_ = Mode::SCAN;
