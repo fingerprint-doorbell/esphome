@@ -464,9 +464,23 @@ void FingerprintDoorbell::process_enrollment() {
       if (result == FINGERPRINT_OK) {
         ESP_LOGI(TAG, "Image converted for sample %d", this->enroll_sample_);
         
+        // Show LED feedback and wait for finger removal (for all samples including last)
+        this->set_led_ring_match();
+        this->enroll_step_ = EnrollStep::WAITING_REMOVE;
+        this->publish_enroll_status("Remove finger");
+      } else {
+        ESP_LOGW(TAG, "Error converting image: %d", result);
+        this->publish_enroll_status("Error, try again");
+        this->enroll_step_ = EnrollStep::WAITING_FOR_FINGER;
+        this->set_led_ring_enroll();
+      }
+      break;
+      
+    case EnrollStep::WAITING_REMOVE:
+      result = this->finger_->getImage();
+      if (result == FINGERPRINT_NOFINGER) {
         if (this->enroll_sample_ >= 5) {
-          // All 5 samples collected, create model immediately
-          // Don't send LED commands before createModel - it can corrupt buffer state
+          // All 5 samples done and finger removed - now safe to create model
           this->publish_enroll_status("Creating model...");
           result = this->finger_->createModel();
           if (result == FINGERPRINT_OK) {
@@ -491,27 +505,12 @@ void FingerprintDoorbell::process_enrollment() {
             this->set_timeout(2000, [this]() { this->set_led_ring_ready(); });
           }
         } else {
-          // Need more samples - show LED feedback for successful scan
-          this->set_led_ring_match();
-          this->enroll_step_ = EnrollStep::WAITING_REMOVE;
-          this->publish_enroll_status("Remove finger");
+          this->enroll_sample_++;
+          ESP_LOGI(TAG, "Ready for sample %d", this->enroll_sample_);
+          this->enroll_step_ = EnrollStep::WAITING_FOR_FINGER;
+          this->set_led_ring_enroll();
+          this->publish_enroll_status("Place finger (" + std::to_string(this->enroll_sample_) + "/5)");
         }
-      } else {
-        ESP_LOGW(TAG, "Error converting image: %d", result);
-        this->publish_enroll_status("Error, try again");
-        this->enroll_step_ = EnrollStep::WAITING_FOR_FINGER;
-        this->set_led_ring_enroll();
-      }
-      break;
-      
-    case EnrollStep::WAITING_REMOVE:
-      result = this->finger_->getImage();
-      if (result == FINGERPRINT_NOFINGER) {
-        this->enroll_sample_++;
-        ESP_LOGI(TAG, "Ready for sample %d", this->enroll_sample_);
-        this->enroll_step_ = EnrollStep::WAITING_FOR_FINGER;
-        this->set_led_ring_enroll();
-        this->publish_enroll_status("Place finger (" + std::to_string(this->enroll_sample_) + "/5)");
       }
       break;
       
