@@ -460,7 +460,8 @@ void FingerprintDoorbell::process_enrollment() {
       break;
       
     case EnrollStep::CONVERTING:
-      result = this->finger_->image2Tz(this->enroll_sample_);
+      // R503 only has 2 character buffers (1 and 2); alternate between them
+      result = this->finger_->image2Tz((this->enroll_sample_ % 2 == 1) ? 1 : 2);
       if (result == FINGERPRINT_OK) {
         ESP_LOGI(TAG, "Image converted for sample %d", this->enroll_sample_);
         
