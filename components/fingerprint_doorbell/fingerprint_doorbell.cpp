@@ -411,13 +411,14 @@ void FingerprintDoorbell::start_enrollment(uint16_t id, const std::string &name)
   this->enroll_id_ = id;
   this->enroll_name_ = name;
   this->enroll_sample_ = 1;
-  this->enroll_timeout_ = millis() + 60000;  // 60 second timeout
+  this->enroll_round_ = 1;
+  this->enroll_timeout_ = millis() + 120000;  // 2 minute timeout for 6 scans
   
   // Pre-write name to preferences so stale names from previous attempts are overwritten
   this->save_fingerprint_name(id, name);
   
   this->set_led_ring_enroll();
-  this->publish_enroll_status("Place finger (1/2)");
+  this->publish_enroll_status("Place finger (1/6)");
   this->publish_last_action("Enrollment started for ID " + std::to_string(id));
 }
 
@@ -459,12 +460,14 @@ void FingerprintDoorbell::process_enrollment() {
       }
       break;
       
-    case EnrollStep::CONVERTING:
-      result = this->finger_->image2Tz(this->enroll_sample_ <= 1 ? 1 : 2);
+    case EnrollStep::CONVERTING: {
+      // enroll_sample_ 1 -> buffer 1, enroll_sample_ 2 -> buffer 2
+      uint8_t buf_id = (this->enroll_sample_ == 1) ? 1 : 2;
+      result = this->finger_->image2Tz(buf_id);
       if (result == FINGERPRINT_OK) {
-        ESP_LOGI(TAG, "Image converted for sample %d", this->enroll_sample_);
-        
-        // Show LED feedback and wait for finger removal (for all samples including last)
+        uint8_t global_scan = (this->enroll_round_ - 1) * 2 + this->enroll_sample_;
+        ESP_LOGI(TAG, "Image converted for round %d, sample %d (global %d/6)",
+                 this->enroll_round_, this->enroll_sample_, global_scan);
         this->set_led_ring_match();
         this->enroll_step_ = EnrollStep::WAITING_REMOVE;
         this->publish_enroll_status("Remove finger");
@@ -475,22 +478,36 @@ void FingerprintDoorbell::process_enrollment() {
         this->set_led_ring_enroll();
       }
       break;
+    }
       
     case EnrollStep::WAITING_REMOVE:
       result = this->finger_->getImage();
       if (result == FINGERPRINT_NOFINGER) {
         if (this->enroll_sample_ >= 2) {
-          // All 5 samples done and finger removed - now safe to create model
-          this->publish_enroll_status("Creating model...");
+          // Both buffers filled for this round - validate with createModel
+          ESP_LOGI(TAG, "Validating round %d...", this->enroll_round_);
+          this->publish_enroll_status("Validating round " + std::to_string(this->enroll_round_) + "...");
           result = this->finger_->createModel();
           if (result == FINGERPRINT_OK) {
-            ESP_LOGI(TAG, "Model created successfully");
-            this->enroll_step_ = EnrollStep::STORING;
-            this->publish_enroll_status("Storing...");
+            ESP_LOGI(TAG, "Round %d validated OK", this->enroll_round_);
+            if (this->enroll_round_ >= 3) {
+              // All 3 rounds passed - store the final model
+              this->enroll_step_ = EnrollStep::STORING;
+              this->publish_enroll_status("Storing...");
+            } else {
+              // Start next round
+              this->enroll_round_++;
+              this->enroll_sample_ = 1;
+              this->enroll_step_ = EnrollStep::WAITING_FOR_FINGER;
+              this->set_led_ring_enroll();
+              uint8_t global_next = (this->enroll_round_ - 1) * 2 + 1;
+              this->publish_enroll_status("Place finger (" + std::to_string(global_next) + "/6)");
+            }
           } else if (result == FINGERPRINT_ENROLLMISMATCH) {
-            ESP_LOGW(TAG, "Fingerprints did not match");
+            ESP_LOGW(TAG, "Round %d: fingerprints did not match", this->enroll_round_);
             this->mode_ = Mode::SCAN;
             this->enroll_step_ = EnrollStep::IDLE;
+            this->enroll_round_ = 1;
             this->set_led_ring_error();
             this->publish_enroll_status("Error: prints don't match");
             this->publish_last_action("Enrollment failed: mismatch");
@@ -499,17 +516,20 @@ void FingerprintDoorbell::process_enrollment() {
             ESP_LOGW(TAG, "Error creating model: %d", result);
             this->mode_ = Mode::SCAN;
             this->enroll_step_ = EnrollStep::IDLE;
+            this->enroll_round_ = 1;
             this->set_led_ring_error();
             this->publish_enroll_status("Error creating model");
             this->publish_last_action("Enrollment failed");
             this->set_timeout(2000, [this]() { this->set_led_ring_ready(); });
           }
         } else {
-          this->enroll_sample_++;
-          ESP_LOGI(TAG, "Ready for sample %d", this->enroll_sample_);
+          // First sample of round done, get second
+          this->enroll_sample_ = 2;
+          uint8_t global_scan = (this->enroll_round_ - 1) * 2 + 2;
+          ESP_LOGI(TAG, "Ready for round %d sample 2 (global %d/6)", this->enroll_round_, global_scan);
           this->enroll_step_ = EnrollStep::WAITING_FOR_FINGER;
           this->set_led_ring_enroll();
-          this->publish_enroll_status("Place finger (" + std::to_string(this->enroll_sample_) + "/2)");
+          this->publish_enroll_status("Place finger (" + std::to_string(global_scan) + "/6)");
         }
       }
       break;
@@ -768,9 +788,10 @@ bool FingerprintDoorbell::upload_template(uint16_t id, const std::string &name, 
     return false;
   }
   
-  // R503 templates are 1536 bytes, but we also accept 512 bytes (feature file) for compatibility
-  if (template_data.size() != 512 && template_data.size() != 1536) {
-    ESP_LOGW(TAG, "Invalid template size: %d bytes (expected 512 or 1536)", (int)template_data.size());
+  // R503 templates are 1536 bytes
+  // Also accept 512 (single char file) or 1024 (two char files without 3rd part)
+  if (template_data.size() != 512 && template_data.size() != 1024 && template_data.size() != 1536) {
+    ESP_LOGW(TAG, "Invalid template size: %d bytes (expected 512, 1024, or 1536)", (int)template_data.size());
     return false;
   }
   
@@ -792,96 +813,111 @@ bool FingerprintDoorbell::upload_template(uint16_t id, const std::string &name, 
   
   ESP_LOGI(TAG, "Uploading template to ID %d (%d bytes, %d-byte packets)", 
            id, (int)template_data.size(), packet_len);
-  
 
-  
-  // Send DownChar command to start receiving template into buffer 1
-  uint8_t cmd_data[] = {FINGERPRINT_DOWNLOAD, 0x01};  // Buffer 1
-  Adafruit_Fingerprint_Packet cmd_packet(FINGERPRINT_COMMANDPACKET, sizeof(cmd_data), cmd_data);
-  this->finger_->writeStructuredPacket(cmd_packet);
-  
-  // Wait for acknowledgment
-  Adafruit_Fingerprint_Packet ack_packet(FINGERPRINT_ACKPACKET, 0, nullptr);
-  if (this->finger_->getStructuredPacket(&ack_packet, 2000) != FINGERPRINT_OK) {
-    ESP_LOGW(TAG, "No acknowledgment for DOWNCHAR command");
-    this->mode_ = previous_mode;
-    return false;
-  }
-  
-  if (ack_packet.data[0] != FINGERPRINT_OK) {
-    ESP_LOGW(TAG, "DOWNCHAR failed: 0x%02X", ack_packet.data[0]);
-    this->mode_ = previous_mode;
-    return false;
-  }
-  
-  ESP_LOGD(TAG, "Sensor ready to receive template data");
-  delay(10);
+  // Delete any existing template at this ID before uploading
+  this->finger_->deleteModel(id);
+  delay(50);
   while (mySerial.available()) mySerial.read();
-  
-  // Send template data in packets
-  const uint32_t addr = 0xFFFFFFFF;
-  size_t total_size = template_data.size();
-  size_t written = 0;
-  int pkt_num = 0;
-  
-  while (written < total_size) {
-    size_t remaining = total_size - written;
-    size_t chunk_size = (remaining > packet_len) ? packet_len : remaining;
-    bool is_last = (remaining <= packet_len);
-    pkt_num++;
+
+  // Helper lambda to send one buffer's worth of data via DOWNCHAR
+  auto send_char_buffer = [&](uint8_t slot, size_t offset, size_t size) -> bool {
+    // Send DownChar command for the specified buffer slot
+    uint8_t cmd_data[] = {FINGERPRINT_DOWNLOAD, slot};
+    Adafruit_Fingerprint_Packet cmd_packet(FINGERPRINT_COMMANDPACKET, sizeof(cmd_data), cmd_data);
+    this->finger_->writeStructuredPacket(cmd_packet);
     
-    // Packet type: 0x02 for data, 0x08 for final packet
-    uint8_t pkt_type = is_last ? FINGERPRINT_ENDDATAPACKET : FINGERPRINT_DATAPACKET;
-    
-    // Length field: data bytes + 2 checksum bytes
-    uint16_t total_len = chunk_size + 2;
-    
-    // Calculate checksum
-    uint16_t checksum = (total_len >> 8) + (total_len & 0xFF) + pkt_type;
-    for (size_t i = 0; i < chunk_size; i++) {
-      checksum += template_data[written + i];
+    // Wait for acknowledgment
+    Adafruit_Fingerprint_Packet ack_packet(FINGERPRINT_ACKPACKET, 0, nullptr);
+    if (this->finger_->getStructuredPacket(&ack_packet, 2000) != FINGERPRINT_OK) {
+      ESP_LOGW(TAG, "No ACK for DOWNCHAR slot %d", slot);
+      return false;
+    }
+    if (ack_packet.data[0] != FINGERPRINT_OK) {
+      ESP_LOGW(TAG, "DOWNCHAR slot %d failed: 0x%02X", slot, ack_packet.data[0]);
+      return false;
     }
     
-    // Write packet header byte-by-byte
-    mySerial.write((uint8_t)(0xEF01 >> 8));
-    mySerial.write((uint8_t)(0xEF01 & 0xFF));
-    mySerial.write((uint8_t)(addr >> 24));
-    mySerial.write((uint8_t)(addr >> 16));
-    mySerial.write((uint8_t)(addr >> 8));
-    mySerial.write((uint8_t)(addr & 0xFF));
-    mySerial.write(pkt_type);
-    mySerial.write((uint8_t)(total_len >> 8));
-    mySerial.write((uint8_t)(total_len & 0xFF));
+    ESP_LOGD(TAG, "Sensor ready to receive %d bytes into slot %d", (int)size, slot);
+    delay(10);
+    while (mySerial.available()) mySerial.read();
     
-    // Write payload data
-    mySerial.write(template_data.data() + written, chunk_size);
+    // Send data in packets
+    const uint32_t addr = 0xFFFFFFFF;
+    size_t written = 0;
+    int pkt_num = 0;
     
-    // Write checksum
-    mySerial.write((uint8_t)(checksum >> 8));
-    mySerial.write((uint8_t)(checksum & 0xFF));
+    while (written < size) {
+      size_t remaining = size - written;
+      size_t chunk_size = (remaining > packet_len) ? packet_len : remaining;
+      bool is_last = (remaining <= packet_len);
+      pkt_num++;
+      
+      uint8_t pkt_type = is_last ? FINGERPRINT_ENDDATAPACKET : FINGERPRINT_DATAPACKET;
+      uint16_t total_len = chunk_size + 2;
+      
+      uint16_t checksum = (total_len >> 8) + (total_len & 0xFF) + pkt_type;
+      for (size_t i = 0; i < chunk_size; i++) {
+        checksum += template_data[offset + written + i];
+      }
+      
+      mySerial.write((uint8_t)(0xEF01 >> 8));
+      mySerial.write((uint8_t)(0xEF01 & 0xFF));
+      mySerial.write((uint8_t)(addr >> 24));
+      mySerial.write((uint8_t)(addr >> 16));
+      mySerial.write((uint8_t)(addr >> 8));
+      mySerial.write((uint8_t)(addr & 0xFF));
+      mySerial.write(pkt_type);
+      mySerial.write((uint8_t)(total_len >> 8));
+      mySerial.write((uint8_t)(total_len & 0xFF));
+      mySerial.write(template_data.data() + offset + written, chunk_size);
+      mySerial.write((uint8_t)(checksum >> 8));
+      mySerial.write((uint8_t)(checksum & 0xFF));
+      
+      ESP_LOGD(TAG, "Slot%d PKT%d: type=0x%02X, len=%d", slot, pkt_num, pkt_type, (int)chunk_size);
+      written += chunk_size;
+      delay(1);
+    }
     
-    ESP_LOGD(TAG, "PKT%d: type=0x%02X, len=%d, total_written=%d", 
-             pkt_num, pkt_type, (int)chunk_size, (int)(written + chunk_size));
+    mySerial.flush();
+    delay(50);
+    while (mySerial.available()) mySerial.read();
     
-    written += chunk_size;
-    delay(1);  // Small yield between packets
-  }
-  
-  ESP_LOGI(TAG, "Sent all %d packets (%d bytes total)", pkt_num, (int)written);
-  
-  delay(100);
-  while (mySerial.available()) mySerial.read();
-  
-  // Delete any existing template at this ID
-  this->finger_->deleteModel(id);
+    ESP_LOGD(TAG, "Slot %d: sent %d packets (%d bytes)", slot, pkt_num, (int)written);
+    return true;
+  };
 
-  delay(100);
+  // R503 needs two character buffers (slot 1 and 2) to form a complete template.
+  // Each character file is 512 bytes. A full 1536-byte template export contains
+  // both char files plus extra data; we use the first 512 bytes for slot 1
+  // and the next 512 bytes for slot 2.
+  size_t char_file_size = 512;
+  
+  if (!send_char_buffer(1, 0, char_file_size)) {
+    this->mode_ = previous_mode;
+    return false;
+  }
+  delay(50);
+  
+  if (!send_char_buffer(2, char_file_size, char_file_size)) {
+    this->mode_ = previous_mode;
+    return false;
+  }
+  delay(50);
+  
+  ESP_LOGI(TAG, "Both char buffers loaded, generating template and storing at ID %d", id);
+  
+  // Generate template from both char buffers
+  uint8_t reg_result = this->finger_->createModel();
+  if (reg_result != FINGERPRINT_OK) {
+    ESP_LOGW(TAG, "createModel (RegModel) failed: 0x%02X", reg_result);
+    // Don't abort - try storing anyway, some sensors skip this step
+  }
+  delay(50);
   while (mySerial.available()) mySerial.read();
   
   // Store the template to flash
   uint8_t result = this->finger_->storeModel(id);
 
-  
   if (result != FINGERPRINT_OK) {
     const char* error_desc = "unknown";
     switch (result) {

@@ -179,6 +179,7 @@ class FingerprintDoorbell : public Component {
   uint16_t enroll_id_{0};
   std::string enroll_name_;
   uint8_t enroll_sample_{0};
+  uint8_t enroll_round_{1};
   uint32_t enroll_timeout_{0};
 
   // Sensor pairing state
