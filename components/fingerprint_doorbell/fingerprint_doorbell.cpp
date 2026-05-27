@@ -417,7 +417,7 @@ void FingerprintDoorbell::start_enrollment(uint16_t id, const std::string &name)
   this->save_fingerprint_name(id, name);
   
   this->set_led_ring_enroll();
-  this->publish_enroll_status("Place finger (1/5)");
+  this->publish_enroll_status("Place finger (1/2)");
   this->publish_last_action("Enrollment started for ID " + std::to_string(id));
 }
 
@@ -460,8 +460,7 @@ void FingerprintDoorbell::process_enrollment() {
       break;
       
     case EnrollStep::CONVERTING:
-      // R503 only has 2 character buffers (1 and 2); alternate between them
-      result = this->finger_->image2Tz((this->enroll_sample_ % 2 == 1) ? 1 : 2);
+      result = this->finger_->image2Tz(this->enroll_sample_ <= 1 ? 1 : 2);
       if (result == FINGERPRINT_OK) {
         ESP_LOGI(TAG, "Image converted for sample %d", this->enroll_sample_);
         
@@ -480,7 +479,7 @@ void FingerprintDoorbell::process_enrollment() {
     case EnrollStep::WAITING_REMOVE:
       result = this->finger_->getImage();
       if (result == FINGERPRINT_NOFINGER) {
-        if (this->enroll_sample_ >= 5) {
+        if (this->enroll_sample_ >= 2) {
           // All 5 samples done and finger removed - now safe to create model
           this->publish_enroll_status("Creating model...");
           result = this->finger_->createModel();
@@ -510,7 +509,7 @@ void FingerprintDoorbell::process_enrollment() {
           ESP_LOGI(TAG, "Ready for sample %d", this->enroll_sample_);
           this->enroll_step_ = EnrollStep::WAITING_FOR_FINGER;
           this->set_led_ring_enroll();
-          this->publish_enroll_status("Place finger (" + std::to_string(this->enroll_sample_) + "/5)");
+          this->publish_enroll_status("Place finger (" + std::to_string(this->enroll_sample_) + "/2)");
         }
       }
       break;
